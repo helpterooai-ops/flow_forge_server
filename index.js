@@ -1,7 +1,7 @@
 require('dotenv').config();
 const axios = require('axios');
 
-const TELEGRAM_API = `https://api.telegram.org/bot${process.env.BOT_TOKEN}`;
+const TELEGRAM_API = 'https://api.telegram.org/bot' + process.env.BOT_TOKEN;
 
 // --------------------- جلسات المستخدمين ---------------------
 const sessions = new Map();
@@ -10,40 +10,16 @@ const sessions = new Map();
 const testMap = {
   nodes: [
     {
-      id: '1',
-      type: 'message',
-      title: 'مرحباً بك في بوت FlowForge!',
-      subtitle: 'سأقوم بأخذ اسمك الآن',
-      variableName: '',
-      prompt: '',
-      isPaused: false,
-      fallbackNodeId: null,
-      color: '',
-      x: 0, y: 0
+      id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', subtitle: 'سأقوم بأخذ اسمك الآن',
+      variableName: '', prompt: '', isPaused: false, fallbackNodeId: null, color: '', x: 0, y: 0
     },
     {
-      id: '2',
-      type: 'input',
-      title: 'أدخل اسمك',
-      subtitle: '',
-      variableName: 'customer_name',
-      prompt: 'ما اسمك الكريم؟',
-      isPaused: false,
-      fallbackNodeId: null,
-      color: '',
-      x: 0, y: 0
+      id: '2', type: 'input', title: 'أدخل اسمك', subtitle: '',
+      variableName: 'customer_name', prompt: 'ما اسمك الكريم؟', isPaused: false, fallbackNodeId: null, color: '', x: 0, y: 0
     },
     {
-      id: '3',
-      type: 'message',
-      title: 'أهلاً بك يا {customer_name}',
-      subtitle: 'كيف يمكنني مساعدتك؟',
-      variableName: '',
-      prompt: '',
-      isPaused: false,
-      fallbackNodeId: null,
-      color: '',
-      x: 0, y: 0
+      id: '3', type: 'message', title: 'أهلاً بك يا {customer_name}', subtitle: 'كيف يمكنني مساعدتك؟',
+      variableName: '', prompt: '', isPaused: false, fallbackNodeId: null, color: '', x: 0, y: 0
     }
   ],
   connections: [
@@ -58,7 +34,6 @@ function getNextNodeId(currentNodeId, connections) {
   return conn ? conn.to : null;
 }
 
-// البحث عن عقدة بمعرفها
 function getNodeById(nodeId, nodes) {
   return nodes.find(n => n.id === nodeId);
 }
@@ -69,7 +44,6 @@ module.exports = async (req, res) => {
     return res.status(200).send('Webhook ready');
   }
 
-  // ✅ الرد فوراً بـ 200 OK (لتجنب إعادة الإرسال)
   res.status(200).end();
 
   const { message } = req.body;
@@ -77,80 +51,51 @@ module.exports = async (req, res) => {
 
   const chatId = message.chat.id;
   const userText = message.text;
-  const storeId = req.url.split('/')[2]; // الحصول على معرف المتجر
+  const storeId = req.url.split('/')[2];
 
-  // استخدام الخريطة التجريبية للمتجر "test" فقط
   const flow = (storeId === 'test') ? testMap : null;
   if (!flow) return;
 
   const nodes = flow.nodes;
   const connections = flow.connections;
 
-  // استرداد جلسة المستخدم أو إنشاء واحدة
   if (!sessions.has(chatId)) {
-    // بداية جديدة: نبدأ من أول عقدة
-    const startNodeId = nodes[0].id;
-    sessions.set(chatId, {
-      currentNodeId: startNodeId,
-      variables: {}
-    });
+    sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
   }
 
   const session = sessions.get(chatId);
   const currentNode = getNodeById(session.currentNodeId, nodes);
-
-  if (!currentNode) {
-    await sendMessage(chatId, 'عذراً، حدث خطأ في المحادثة.');
-    return;
-  }
+  if (!currentNode) return;
 
   try {
-    // ------------------ التعامل حسب نوع العقدة ------------------
     switch (currentNode.type) {
-      case 'message':
-        // إرسال النص الموجود في العقدة (بعد استبدال المتغيرات)
+      case 'message': {
         const text = replaceVariables(currentNode.title, session.variables);
         await sendMessage(chatId, text);
-        // الانتقال إلى العقدة التالية
         const nextId = getNextNodeId(currentNode.id, connections);
-        if (nextId) {
-          session.currentNodeId = nextId;
-        }
+        if (nextId) session.currentNodeId = nextId;
         break;
-
-      case 'input':
-        // حفظ القيمة المُدخلة من المستخدم في المتغير
+      }
+      case 'input': {
         if (currentNode.variableName) {
           session.variables[currentNode.variableName] = userText;
         }
-        // إرسال رسالة تأكيد (يمكن أن تكون فارغة)
         if (currentNode.prompt) {
           const promptText = replaceVariables(currentNode.prompt, session.variables);
           await sendMessage(chatId, promptText);
         }
-        // الانتقال إلى العقدة التالية
         const nextInputId = getNextNodeId(currentNode.id, connections);
-        if (nextInputId) {
-          session.currentNodeId = nextInputId;
-        }
+        if (nextInputId) session.currentNodeId = nextInputId;
         break;
-
-      case 'intent':
-        // تجميع الخيارات الممكنة (عناوين العقد المرتبطة)
+      }
+      case 'intent': {
         const options = connections
           .filter(c => c.from === currentNode.id)
-          .map(c => {
-            const targetNode = getNodeById(c.to, nodes);
-            return targetNode ? targetNode.title : '';
-          })
+          .map(c => { const target = getNodeById(c.to, nodes); return target ? target.title : ''; })
           .filter(Boolean);
-        
-        // استدعاء Gemini لتصنيف النية
         const intent = await classifyIntent(userText, options);
         if (intent) {
-          const matchedConn = connections.find(
-            c => c.from === currentNode.id && getNodeById(c.to, nodes)?.title === intent
-          );
+          const matchedConn = connections.find(c => c.from === currentNode.id && getNodeById(c.to, nodes)?.title === intent);
           if (matchedConn) {
             session.currentNodeId = matchedConn.to;
           } else {
@@ -160,7 +105,7 @@ module.exports = async (req, res) => {
           await sendMessage(chatId, 'عذراً، فشل التصنيف.');
         }
         break;
-
+      }
       default:
         await sendMessage(chatId, 'نوع عقدة غير معروف.');
     }
@@ -170,12 +115,8 @@ module.exports = async (req, res) => {
 };
 
 // --------------------- دوال مساعدة ---------------------
-
 async function sendMessage(chatId, text) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: text
-  });
+  await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text });
 }
 
 function replaceVariables(template, variables) {
@@ -184,15 +125,13 @@ function replaceVariables(template, variables) {
 
 async function classifyIntent(userText, options) {
   const apiKey = process.env.GEMINI_API_KEY;
-  const prompt = `أنت مصنف نوايا. الخيارات المتاحة: ${options.join('، ')}.
-
-
-  const response = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      contents: [{ parts: [{ text: prompt }] }]
-    }
-  );
+  const prompt = 'أنت مصنف نوايا. الخيارات المتاحة: ' + options.join('، ') +
+    '. صنف رسالة المستخدم التالية إلى أحد هذه الخيارات. أعد JSON فقط بالشكل: {"intent": "اسم_النية"}\n\nالرسالة: "' + userText + '"';
+  
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiKey;
+  const response = await axios.post(url, {
+    contents: [{ parts: [{ text: prompt }] }]
+  });
 
   const data = response.data;
   try {
