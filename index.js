@@ -1,7 +1,9 @@
-require('dotenv').config();
 const axios = require('axios');
 
-const TELEGRAM_API = 'https://api.telegram.org/bot' + process.env.BOT_TOKEN;
+// في Vercel المتغيرات تُحقن تلقائياً، لا حاجة لـ dotenv
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
 // --------------------- جلسات المستخدمين ---------------------
 const sessions = new Map();
@@ -10,16 +12,25 @@ const sessions = new Map();
 const testMap = {
   nodes: [
     {
-      id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', subtitle: 'سأقوم بأخذ اسمك الآن',
-      variableName: '', prompt: '', isPaused: false, fallbackNodeId: null, color: '', x: 0, y: 0
+      id: '1', type: 'message',
+      title: 'مرحباً بك في بوت FlowForge!',
+      subtitle: '', variableName: '', prompt: '', isPaused: false, fallbackNodeId: null,
+      color: '', x: 0, y: 0
     },
     {
-      id: '2', type: 'input', title: 'أدخل اسمك', subtitle: '',
-      variableName: 'customer_name', prompt: 'ما اسمك الكريم؟', isPaused: false, fallbackNodeId: null, color: '', x: 0, y: 0
+      id: '2', type: 'input',
+      title: 'أدخل اسمك',
+      subtitle: '',
+      variableName: 'customer_name',
+      prompt: 'ما اسمك الكريم؟',
+      isPaused: false, fallbackNodeId: null,
+      color: '', x: 0, y: 0
     },
     {
-      id: '3', type: 'message', title: 'أهلاً بك يا {customer_name}', subtitle: 'كيف يمكنني مساعدتك؟',
-      variableName: '', prompt: '', isPaused: false, fallbackNodeId: null, color: '', x: 0, y: 0
+      id: '3', type: 'message',
+      title: 'أهلاً بك يا {customer_name}',
+      subtitle: '', variableName: '', prompt: '', isPaused: false, fallbackNodeId: null,
+      color: '', x: 0, y: 0
     }
   ],
   connections: [
@@ -28,9 +39,8 @@ const testMap = {
   ]
 };
 
-// استخراج العقدة التالية من الاتصالات
-function getNextNodeId(currentNodeId, connections) {
-  const conn = connections.find(c => c.from === currentNodeId);
+function getNextNodeId(nodeId, connections) {
+  const conn = connections.find(c => c.from === nodeId);
   return conn ? conn.to : null;
 }
 
@@ -38,66 +48,128 @@ function getNodeById(nodeId, nodes) {
   return nodes.find(n => n.id === nodeId);
 }
 
-// --------------------- معالجة الرسائل ---------------------
+function replaceVariables(template, vars) {
+  return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || '');
+}
+
+async function sendMessage(chatId, text) {
+  console.log('Sending to', chatId, ':', text);
+  await axios.post(TELEGRAM_API + '/sendMessage', {
+    chat_id: chatId,
+    text: text
+  });
+}
+
+async function classifyIntent(userText, options) {
+  const prompt = 'أنت مصنف نوايا. الخيارات المتاحة: ' + options.join('، ') +
+    '. صنف رسالة المستخدم التالية إلى أحد هذه الخيارات. أعد JSON فقط بالشكل: {"intent": "اسم_النية"}\n\nالرسالة: "' + userText + '"';
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + GEMINI_API_KEY;
+  const resp = await axios.post(url, {
+    contents: [{ parts: [{ text: prompt }] }]
+  });
+  const data = resp.data;
+  const raw = data.candidates[0].content.parts[0].text;
+  const parsed = JSON.parse(raw.trim());
+  return parsed.intent;
+}
+
+// --------------------- معالج الطلب ---------------------
 module.exports = async (req, res) => {
+  // السماح فقط بطلبات POST
   if (req.method !== 'POST') {
     return res.status(200).send('Webhook ready');
   }
 
-  res.status(200).end();
-
   const { message } = req.body;
-  if (!message || !message.text) return;
+  if (!message || !message.text) {
+    return res.status(200).end();
+  }
 
   const chatId = message.chat.id;
   const userText = message.text;
   const storeId = req.url.split('/')[2];
 
   const flow = (storeId === 'test') ? testMap : null;
-  if (!flow) return;
+  if (!flow) {
+    return res.status(200).end();
+  }
 
   const nodes = flow.nodes;
   const connections = flow.connections;
 
+  // تهيئة الجلسة
   if (!sessions.has(chatId)) {
     sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
   }
-
   const session = sessions.get(chatId);
   const currentNode = getNodeById(session.currentNodeId, nodes);
-  if (!currentNode) return;
+  if (!currentNode) {
+    await sendMessage(chatId, 'عذراً، حدث خطأ في المحادثة.');
+    return res.status(200).end();
+  }
 
   try {
     switch (currentNode.type) {
-      case 'message': {
-        const text = replaceVariables(currentNode.title, session.variables);
-        await sendMessage(chatId, text);
-        const nextId = getNextNodeId(currentNode.id, connections);
-        if (nextId) session.currentNodeId = nextId;
+      case 'message':
+        await sendMessage(chatId, replaceVariables(currentNode.title, session.variables));
+        // الانتقال إلى العقدة التالية
+        const nextMsgId = getNextNodeId(currentNode.id, connections);
+        if (nextMsgId) {
+          session.currentNodeId = nextMsgId;
+          // إذا كانت العقدة التالية "إدخال"، نرسل السؤال فوراً
+          const nextNode = getNodeById(nextMsgId, nodes);
+          if (nextNode && nextNode.type === 'input' && nextNode.prompt) {
+            await sendMessage(chatId, replaceVariables(nextNode.prompt, session.variables));
+          }
+        }
         break;
-      }
-      case 'input': {
+
+      case 'input':
+        // حفظ القيمة المدخلة
         if (currentNode.variableName) {
           session.variables[currentNode.variableName] = userText;
         }
-        if (currentNode.prompt) {
-          const promptText = replaceVariables(currentNode.prompt, session.variables);
-          await sendMessage(chatId, promptText);
+        // الانتقال إلى العقدة التالية
+        const nextInpId = getNextNodeId(currentNode.id, connections);
+        if (nextInpId) {
+          session.currentNodeId = nextInpId;
+          // إذا كانت العقدة التالية "رسالة"، نرسلها فوراً
+          const nextNode = getNodeById(nextInpId, nodes);
+          if (nextNode && nextNode.type === 'message') {
+            await sendMessage(chatId, replaceVariables(nextNode.title, session.variables));
+            // ثم ننتقل مجدداً إلى التي تليها إن وجدت
+            const afterNextId = getNextNodeId(nextNode.id, connections);
+            if (afterNextId) {
+              session.currentNodeId = afterNextId;
+              const afterNext = getNodeById(afterNextId, nodes);
+              if (afterNext && afterNext.type === 'input' && afterNext.prompt) {
+                await sendMessage(chatId, replaceVariables(afterNext.prompt, session.variables));
+              }
+            }
+          }
         }
-        const nextInputId = getNextNodeId(currentNode.id, connections);
-        if (nextInputId) session.currentNodeId = nextInputId;
         break;
-      }
-      case 'intent': {
+
+      case 'intent':
         const options = connections
           .filter(c => c.from === currentNode.id)
-          .map(c => { const target = getNodeById(c.to, nodes); return target ? target.title : ''; })
+          .map(c => getNodeById(c.to, nodes)?.title)
           .filter(Boolean);
         const intent = await classifyIntent(userText, options);
         if (intent) {
-          const matchedConn = connections.find(c => c.from === currentNode.id && getNodeById(c.to, nodes)?.title === intent);
+          const matchedConn = connections.find(
+            c => c.from === currentNode.id && getNodeById(c.to, nodes)?.title === intent
+          );
           if (matchedConn) {
             session.currentNodeId = matchedConn.to;
+            const newCurrent = getNodeById(matchedConn.to, nodes);
+            if (newCurrent) {
+              if (newCurrent.type === 'message') {
+                await sendMessage(chatId, replaceVariables(newCurrent.title, session.variables));
+              } else if (newCurrent.type === 'input' && newCurrent.prompt) {
+                await sendMessage(chatId, replaceVariables(newCurrent.prompt, session.variables));
+              }
+            }
           } else {
             await sendMessage(chatId, 'لم أفهم قصدك، حاول مرة أخرى.');
           }
@@ -105,41 +177,15 @@ module.exports = async (req, res) => {
           await sendMessage(chatId, 'عذراً، فشل التصنيف.');
         }
         break;
-      }
+
       default:
         await sendMessage(chatId, 'نوع عقدة غير معروف.');
     }
   } catch (err) {
     console.error('Error:', err.message);
+    await sendMessage(chatId, 'حدث خطأ غير متوقع.');
   }
+
+  // ✅ نرسل 200 OK بعد الانتهاء من كل المعالجة
+  res.status(200).end();
 };
-
-// --------------------- دوال مساعدة ---------------------
-async function sendMessage(chatId, text) {
-  await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text });
-}
-
-function replaceVariables(template, variables) {
-  return template.replace(/\{(\w+)\}/g, (_, key) => variables[key] || '');
-}
-
-async function classifyIntent(userText, options) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  const prompt = 'أنت مصنف نوايا. الخيارات المتاحة: ' + options.join('، ') +
-    '. صنف رسالة المستخدم التالية إلى أحد هذه الخيارات. أعد JSON فقط بالشكل: {"intent": "اسم_النية"}\n\nالرسالة: "' + userText + '"';
-  
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiKey;
-  const response = await axios.post(url, {
-    contents: [{ parts: [{ text: prompt }] }]
-  });
-
-  const data = response.data;
-  try {
-    const raw = data.candidates[0].content.parts[0].text;
-    const parsed = JSON.parse(raw.trim());
-    return parsed.intent;
-  } catch (e) {
-    console.error('Gemini parsing error:', e);
-    return null;
-  }
-}
