@@ -69,7 +69,9 @@ module.exports = async (req, res) => {
 
   const chatId = message.chat.id;
   const userText = message.text;
-  const storeId = req.url.split('/')[2];
+
+  // ✅ استخراج storeId بشكل صحيح: آخر جزء من المسار
+  const storeId = req.url.split('/').pop();
 
   // تجاهل المتاجر غير المعروفة
   if (storeId !== 'test') {
