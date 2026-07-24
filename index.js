@@ -4,8 +4,10 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-const sessions = new Map();
+// ---------- ذاكرة التخزين المؤقت للتصنيف ----------
+const intentCache = new Map();   // key: userId::userText, value: { intent, confidence }
 
+// ---------- الخريطة التجريبية ----------
 const testMap = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -22,70 +24,63 @@ const testMap = {
   ]
 };
 
-// دوال مساعدة
-function getNodeById(id, nodes) {
-  return nodes.find(n => n.id === id);
-}
-
-function replaceVariables(template, vars) {
-  return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || '');
-}
+// ---------- دوال مساعدة ----------
+function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
+function replaceVariables(t, v) { return t.replace(/\{(\w+)\}/g, (_, k) => v[k] || ''); }
 
 async function sendMessage(chatId, text) {
-  await axios.post(TELEGRAM_API + '/sendMessage', {
-    chat_id: chatId,
-    text: text
-  });
+  await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text });
 }
 
-// تصنيف بسيط بالكلمات المفتاحية لتوفير الرصيد
-function quickKeywordMatch(userText) {
-  const text = userText.trim().toLowerCase();
-  if (text.includes('مساعدة') || text.includes('دعم') || text.includes('ساعد')) {
-    return 'طلب مساعدة';
-  }
-  if (text.includes('حالة') || text.includes('طلبي') || text.includes('تتبع')) {
-    return 'حالة الطلب';
-  }
-  return null; // لا يوجد تطابق كلماتي، نحتاج Gemini
+// ---------- تصنيف بالكلمات المفتاحية (مجاني 100%) ----------
+function quickKeywordMatch(text) {
+  const t = text.trim().toLowerCase();
+  if (/مساعدة|دعم|ساعد|الغى|الغي|الغاء/.test(t)) return 'طلب مساعدة';
+  if (/حالة|طلبي|تتبع|رقم الطلب|وين الطلب/.test(t)) return 'حالة الطلب';
+  if (/شكوى|مشكلة|سيء|غاضب/.test(t)) return 'شكوى';
+  return null;
 }
 
-// استدعاء Gemini (فقط عند عدم تطابق الكلمات)
-async function classifyIntent(userText, options) {
-  const prompt = `أنت مصنف نوايا دقيق. صنف رسالة المستخدم إلى أحد هذه النوايا: [${options.join(', ')}].
-أعد JSON فقط بدون أي نص آخر، بالشكل:
-{"intent":"اسم_النية","confidence":0.9}
+// ---------- استدعاء Gemini مع ذاكرة مؤقتة ----------
+async function classifyIntentGemini(userText, options, userId) {
+  // تحقق من الذاكرة المؤقتة أولاً
+  const cacheKey = `${userId}::${userText}`;
+  if (intentCache.has(cacheKey)) {
+    return intentCache.get(cacheKey);
+  }
 
-الرسالة: "${userText}"`;
-
+  // برومبت مختصر
+  const prompt = `صنف النية للرسالة. الخيارات: ${options.join(', ')}. أعد JSON: {"intent":"...","confidence":0.0}`;
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
-    const response = await axios.post(url, {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.0 }
-    }, { timeout: 5000 }); // 5 ثوانٍ كافية
+    const { data } = await axios.post(url, {
+      contents: [{ parts: [{ text: `${prompt}\nالرسالة: "${userText}"` }] }],
+      generationConfig: { temperature: 0.0, maxOutputTokens: 60 }
+    }, { timeout: 5000 });
 
-    const raw = response.data.candidates[0].content.parts[0].text;
+    const raw = data.candidates[0].content.parts[0].text;
     const cleaned = raw.replace(/```json|```/g, '').trim();
-    return JSON.parse(cleaned);
+    const result = JSON.parse(cleaned);
+
+    // نخزّن للاستخدام المستقبلي (حتى 100 عنصر)
+    if (intentCache.size > 100) intentCache.clear();
+    intentCache.set(cacheKey, result);
+
+    return result;
   } catch (err) {
-    // طباعة الخطأ في السجلات للمراجعة
-    console.error('Gemini API error:', err.response?.status, err.response?.data || err.message);
-    // إذا فشل Gemini، نرجع null (سيتحول إلى fallback)
+    console.error('Gemini error:', err.response?.status, err.message);
     return null;
   }
 }
 
-// استخراج العقدة التالية من اتصال مباشر (بدون شرط)
 function getConnectionTarget(nodeId, connections, nodes) {
   const conn = connections.find(c => c.from === nodeId && !c.condition);
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// المعالج الرئيسي
+// ---------- المعالج الرئيسي ----------
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('Webhook ready');
-
   const { message } = req.body;
   if (!message || !message.text) return res.status(200).end();
 
@@ -97,9 +92,8 @@ module.exports = async (req, res) => {
   const flow = testMap;
   const { nodes, connections } = flow;
 
-  if (!sessions.has(chatId)) {
-    sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
-  }
+  // جلسة
+  if (!sessions.has(chatId)) sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
   const session = sessions.get(chatId);
   const currentNode = getNodeById(session.currentNodeId, nodes);
   if (!currentNode) {
@@ -114,16 +108,12 @@ module.exports = async (req, res) => {
         const nextMsg = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextMsg) {
           session.currentNodeId = nextMsg.id;
-          if (nextMsg.prompt) {
-            await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
-          }
+          if (nextMsg.prompt) await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
         }
         break;
 
       case 'input':
-        if (currentNode.variableName) {
-          session.variables[currentNode.variableName] = userText;
-        }
+        if (currentNode.variableName) session.variables[currentNode.variableName] = userText;
         const nextInp = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextInp) {
           session.currentNodeId = nextInp.id;
@@ -141,36 +131,40 @@ module.exports = async (req, res) => {
           .map(c => c.condition);
         const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
 
-        // أولاً، جرب الكلمات المفتاحية (سريع ومجاني)
+        // 1) فلتر الكلمات
         let intent = quickKeywordMatch(userText);
+        let confidence = 1.0;
 
-        // إذا لم نجد، نستخدم Gemini
+        // 2) Gemini (مع ذاكرة مؤقتة)
         if (!intent) {
-          const geminiResult = await classifyIntent(userText, options);
-          if (geminiResult && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent)) {
-            intent = geminiResult.intent;
-          } else {
-            // Gemini فشل أو ثقة منخفضة => استخدم fallback
-            intent = null;
+          const geminiRes = await classifyIntentGemini(userText, options, chatId);
+          if (geminiRes && geminiRes.confidence >= 0.7 && options.includes(geminiRes.intent)) {
+            intent = geminiRes.intent;
+            confidence = geminiRes.confidence;
           }
         }
 
+        // 3) اتخذ الإجراء
         if (intent && options.includes(intent)) {
           const matched = connections.find(c => c.from === currentNode.id && c.condition === intent);
           if (matched) {
-            const nextNode = getNodeById(matched.to, nodes);
-            if (nextNode) {
-              session.currentNodeId = nextNode.id;
-              await sendMessage(chatId, replaceVariables(nextNode.title, session.variables));
+            session.currentNodeId = matched.to;
+            const targetNode = getNodeById(matched.to, nodes);
+            if (targetNode) {
+              if (targetNode.type === 'message') {
+                await sendMessage(chatId, replaceVariables(targetNode.title, session.variables));
+              } else if (targetNode.prompt) {
+                await sendMessage(chatId, replaceVariables(targetNode.prompt, session.variables));
+              }
             }
           }
         } else {
-          // استخدم العقدة الاحتياطية
+          // Fallback
           if (fallbackConn) {
-            const fallbackNode = getNodeById(fallbackConn.to, nodes);
-            if (fallbackNode) {
-              session.currentNodeId = fallbackNode.id;
-              await sendMessage(chatId, replaceVariables(fallbackNode.title, session.variables));
+            const fbNode = getNodeById(fallbackConn.to, nodes);
+            if (fbNode) {
+              session.currentNodeId = fbNode.id;
+              await sendMessage(chatId, replaceVariables(fbNode.title, session.variables));
             }
           } else {
             await sendMessage(chatId, 'لم أفهم قصدك، حاول مجدداً.');
@@ -178,13 +172,10 @@ module.exports = async (req, res) => {
         }
         break;
       }
-
-      default:
-        await sendMessage(chatId, 'نوع عقدة غير معروف.');
     }
   } catch (err) {
     console.error('Unexpected error:', err.message);
-    await sendMessage(chatId, 'عذراً، حدث خطأ غير متوقع. حاول مرة أخرى لاحقاً.');
+    await sendMessage(chatId, 'حدث خطأ غير متوقع. حاول مرة أخرى.');
   }
 
   res.status(200).end();
