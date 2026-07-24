@@ -26,11 +26,11 @@ const FALLBACK_MAP = {
 // ---------- اتصال MongoDB (سريع، فشل خلال ثانيتين) ----------
 let client;
 let db;
-let mongoAvailable = true; // نفترض أنه متاح حتى يثبت العكس
+let mongoAvailable = true;
 
 async function connectToMongo() {
   if (db) return db;
-  if (!mongoAvailable) return null; // إذا فشل سابقاً، لا تحاول مرة أخرى في هذا الطلب
+  if (!mongoAvailable) return null;
   try {
     client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 2000, connectTimeoutMS: 2000 });
     await client.connect();
@@ -39,7 +39,7 @@ async function connectToMongo() {
     return db;
   } catch (err) {
     console.error('❌ MongoDB unavailable, using fallback map');
-    mongoAvailable = false; // تعطيل المحاولات اللاحقة (ستُعاد عند إعادة تشغيل الخادم)
+    mongoAvailable = false;
     return null;
   }
 }
@@ -68,11 +68,13 @@ function quickKeywordMatch(userText) {
   return null;
 }
 
+// ---------- تصنيف Gemini مع خيار "none" ----------
 async function classifyIntent(userText, options, userId) {
   const cacheKey = `${userId}::${userText}`;
   if (intentCache.has(cacheKey)) return intentCache.get(cacheKey);
 
-  const prompt = `صنف النية للرسالة. الخيارات: [${options.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}\n\nالرسالة: "${userText}"`;
+  const allOptions = [...options, 'none'];
+  const prompt = `صنف النية للرسالة. إذا لم تطابق أي نية، اختر "none". النوايا المتاحة: [${allOptions.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}\n\nالرسالة: "${userText}"`;
 
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
@@ -84,6 +86,13 @@ async function classifyIntent(userText, options, userId) {
     const raw = response.data.candidates[0].content.parts[0].text;
     const cleaned = raw.replace(/```json|```/g, '').trim();
     const result = JSON.parse(cleaned);
+
+    if (result.intent === 'none' || result.confidence < 0.6) {
+      const noneResult = { intent: 'none', confidence: 0 };
+      if (intentCache.size > 100) intentCache.clear();
+      intentCache.set(cacheKey, noneResult);
+      return noneResult;
+    }
 
     if (intentCache.size > 100) intentCache.clear();
     intentCache.set(cacheKey, result);
@@ -183,7 +192,7 @@ module.exports = async (req, res) => {
 
         if (!intent) {
           const geminiResult = await classifyIntent(userText, options, chatId);
-          if (geminiResult && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent)) {
+          if (geminiResult && geminiResult.intent !== 'none' && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent)) {
             intent = geminiResult.intent;
           } else {
             intent = null;
