@@ -1,29 +1,28 @@
 const axios = require('axios');
+const { MongoClient } = require('mongodb');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-const sessions = new Map();   // ✅ الجلسات معرفة هنا
+// اتصال MongoDB (يعاد استخدامه بين الطلبات)
+let client;
+let db;
 
-// ---------- ذاكرة مؤقتة للتصنيف (لتوفير الرصيد) ----------
+async function getDb() {
+  if (!client) {
+    client = new MongoClient(MONGODB_URI);
+    await client.connect();
+    db = client.db('flowforge');
+  }
+  return db;
+}
+
+// جلسات المستخدمين
+const sessions = new Map();
+// ذاكرة مؤقتة للتصنيف
 const intentCache = new Map();
-
-const testMap = {
-  nodes: [
-    { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
-    { id: '2', type: 'input',   title: 'أدخل اسمك', prompt: 'ما اسمك الكريم؟', variableName: 'customer_name', isPaused: false, fallbackNodeId: null },
-    { id: '3', type: 'intent',  title: 'تصنيف الطلب', prompt: 'كيف يمكنني مساعدتك يا {customer_name}؟', variableName: '', isPaused: false, fallbackNodeId: 'fallback' },
-    { id: '4', type: 'message', title: 'حسناً، إليك تفاصيل المساعدة التي طلبتها.', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
-    { id: 'fallback', type: 'message', title: 'عذراً، لم أفهم قصدك. يمكنك طلب "مساعدة" أو "حالة الطلب".', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null }
-  ],
-  connections: [
-    { from: '1', to: '2' },
-    { from: '2', to: '3' },
-    { from: '3', to: '4', condition: 'طلب مساعدة' },
-    { from: '3', to: 'fallback', condition: 'fallback' }
-  ]
-};
 
 // دوال مساعدة
 function getNodeById(id, nodes) {
@@ -41,7 +40,7 @@ async function sendMessage(chatId, text) {
   });
 }
 
-// ---------- فلتر كلمات مفتاحية موسع (مجاني 100%) ----------
+// فلتر كلمات مفتاحية موسع
 function quickKeywordMatch(userText) {
   const t = userText.trim().toLowerCase();
   if (t.includes('مساعدة') || t.includes('دعم') || t.includes('ساعد') || t.includes('الغى') || t.includes('الغي')) return 'طلب مساعدة';
@@ -49,17 +48,14 @@ function quickKeywordMatch(userText) {
   return null;
 }
 
-// ---------- Gemini مع ذاكرة مؤقتة (لتوفير الرصيد) ----------
+// Gemini مع ذاكرة مؤقتة
 async function classifyIntent(userText, options, userId) {
-  // تحقق من الذاكرة المؤقتة أولاً
   const cacheKey = `${userId}::${userText}`;
   if (intentCache.has(cacheKey)) {
     return intentCache.get(cacheKey);
   }
 
-  const prompt = `صنف النية للرسالة. الخيارات: [${options.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}
-
-الرسالة: "${userText}"`;
+  const prompt = `صنف النية للرسالة. الخيارات: [${options.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}\n\nالرسالة: "${userText}"`;
 
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
@@ -72,13 +68,11 @@ async function classifyIntent(userText, options, userId) {
     const cleaned = raw.replace(/```json|```/g, '').trim();
     const result = JSON.parse(cleaned);
 
-    // تخزين في الذاكرة المؤقتة (حد أقصى 100 عنصر)
     if (intentCache.size > 100) intentCache.clear();
     intentCache.set(cacheKey, result);
-
     return result;
   } catch (err) {
-    console.error('Gemini API error:', err.response?.status, err.response?.data || err.message);
+    console.error('Gemini API error:', err.response?.status, err.message);
     return null;
   }
 }
@@ -88,7 +82,7 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// ---------- المعالج الرئيسي (نفس المنطق الناجح) ----------
+// --------------------- المعالج الرئيسي ---------------------
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('Webhook ready');
 
@@ -98,22 +92,32 @@ module.exports = async (req, res) => {
   const chatId = message.chat.id;
   const userText = message.text;
   const storeId = req.url.split('/').pop();
-  if (storeId !== 'test') return res.status(200).end();
-
-  const flow = testMap;
-  const { nodes, connections } = flow;
-
-  if (!sessions.has(chatId)) {
-    sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
-  }
-  const session = sessions.get(chatId);
-  const currentNode = getNodeById(session.currentNodeId, nodes);
-  if (!currentNode) {
-    await sendMessage(chatId, 'عذراً، فقدت مكانك في المحادثة. اكتب /start للبدء من جديد.');
-    return res.status(200).end();
-  }
 
   try {
+    const database = await getDb();
+    const storesCollection = database.collection('stores');
+
+    // جلب خريطة المتجر من MongoDB
+    const storeDoc = await storesCollection.findOne({ storeId: storeId });
+    if (!storeDoc || !storeDoc.flow) {
+      await sendMessage(chatId, 'المتجر غير جاهز بعد.');
+      return res.status(200).end();
+    }
+
+    const flow = storeDoc.flow;
+    const { nodes, connections } = flow;
+
+    // جلسة
+    if (!sessions.has(chatId)) {
+      sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
+    }
+    const session = sessions.get(chatId);
+    const currentNode = getNodeById(session.currentNodeId, nodes);
+    if (!currentNode) {
+      await sendMessage(chatId, 'عذراً، فقدت مكانك في المحادثة. اكتب /start للبدء من جديد.');
+      return res.status(200).end();
+    }
+
     switch (currentNode.type) {
       case 'message':
         await sendMessage(chatId, replaceVariables(currentNode.title, session.variables));
@@ -147,10 +151,8 @@ module.exports = async (req, res) => {
           .map(c => c.condition);
         const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
 
-        // 1) تجربة الكلمات المفتاحية (مجاني)
         let intent = quickKeywordMatch(userText);
 
-        // 2) إن لم نجد، نستخدم Gemini مع الذاكرة المؤقتة
         if (!intent) {
           const geminiResult = await classifyIntent(userText, options, chatId);
           if (geminiResult && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent)) {
@@ -170,7 +172,6 @@ module.exports = async (req, res) => {
             }
           }
         } else {
-          // Fallback
           if (fallbackConn) {
             const fallbackNode = getNodeById(fallbackConn.to, nodes);
             if (fallbackNode) {
@@ -189,7 +190,7 @@ module.exports = async (req, res) => {
     }
   } catch (err) {
     console.error('Unexpected error:', err.message);
-    await sendMessage(chatId, 'عذراً، حدث خطأ غير متوقع. حاول مرة أخرى لاحقاً.');
+    await sendMessage(chatId, 'حدث خطأ غير متوقع.');
   }
 
   res.status(200).end();
