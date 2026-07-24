@@ -1,11 +1,11 @@
 const axios = require('axios');
-const { MongoClient } = require('mongodb');
+const { kv } = require('@vercel/kv');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
+// خريطة احتياطية (للمتجر test)
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -22,24 +22,7 @@ const FALLBACK_MAP = {
   ]
 };
 
-let client, db, mongoAvailable = true;
-
-async function connectToMongo() {
-  if (db) return db;
-  if (!mongoAvailable) return null;
-  try {
-    client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 2000, connectTimeoutMS: 2000 });
-    await client.connect();
-    db = client.db('flowforge');
-    console.log('✅ MongoDB connected');
-    return db;
-  } catch (err) {
-    console.error('❌ MongoDB unavailable, using fallback');
-    mongoAvailable = false;
-    return null;
-  }
-}
-
+// جلسات وذاكرة مؤقتة
 const sessions = new Map();
 const intentCache = new Map();
 
@@ -83,29 +66,20 @@ function getConnectionTarget(nodeId, connections, nodes) {
 }
 
 module.exports = async (req, res) => {
-  // --- نقطة النهاية لحفظ الخريطة من التطبيق ---
+  // --- نقطة النهاية لحفظ الخريطة من التطبيق (تستخدم Upstash KV) ---
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
     if (!flowData || !flowData.nodes || !flowData.connections) {
       return res.status(400).json({ error: 'Invalid map data' });
     }
-    const database = await connectToMongo();
-    if (!database) {
-      return res.status(503).json({ error: 'Database unavailable' });
-    }
     try {
-      const collection = database.collection('stores');
-      await collection.updateOne(
-        { storeId: storeId },
-        { $set: { storeId: storeId, flow: flowData } },
-        { upsert: true }
-      );
-      console.log(`✅ Map updated for store ${storeId}`);
+      await kv.set(`map:${storeId}`, JSON.stringify(flowData));
+      console.log(`✅ Map stored in Upstash KV for store ${storeId}`);
       return res.status(200).json({ success: true });
     } catch (err) {
-      console.error('Map save error:', err.message);
-      return res.status(500).json({ error: 'Failed to save map' });
+      console.error('KV save error:', err.message);
+      return res.status(503).json({ error: 'Failed to save map' });
     }
   }
 
@@ -127,13 +101,18 @@ module.exports = async (req, res) => {
   }
 
   let flow = null;
-  const database = await connectToMongo();
-  if (database) {
-    try {
-      const storeDoc = await database.collection('stores').findOne({ storeId: storeId });
-      if (storeDoc && storeDoc.flow) flow = storeDoc.flow;
-    } catch (err) {}
+
+  // محاولة تحميل الخريطة من Upstash KV
+  try {
+    const raw = await kv.get(`map:${storeId}`);
+    if (raw) {
+      flow = JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error('KV read error:', err.message);
   }
+
+  // إذا لم توجد، استخدم الخريطة الاحتياطية
   if (!flow) {
     if (storeId === 'test') flow = FALLBACK_MAP;
     else {
@@ -143,6 +122,7 @@ module.exports = async (req, res) => {
   }
 
   const { nodes, connections } = flow;
+
   if (!sessions.has(chatId)) sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
   const session = sessions.get(chatId);
   const currentNode = getNodeById(session.currentNodeId, nodes);
