@@ -6,7 +6,6 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-// ---------- خريطة احتياطية (تُستخدم إذا فشل الاتصال بـ MongoDB) ----------
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -23,7 +22,6 @@ const FALLBACK_MAP = {
   ]
 };
 
-// ---------- اتصال MongoDB (سريع، فشل خلال ثانيتين) ----------
 let client;
 let db;
 let mongoAvailable = true;
@@ -44,11 +42,9 @@ async function connectToMongo() {
   }
 }
 
-// ---------- جلسات وذاكرة مؤقتة ----------
 const sessions = new Map();
 const intentCache = new Map();
 
-// ---------- دوال مساعدة ----------
 function getNodeById(id, nodes) {
   return nodes.find(n => n.id === id);
 }
@@ -68,7 +64,6 @@ function quickKeywordMatch(userText) {
   return null;
 }
 
-// ---------- تصنيف Gemini مع خيار "none" ----------
 async function classifyIntent(userText, options, userId) {
   const cacheKey = `${userId}::${userText}`;
   if (intentCache.has(cacheKey)) return intentCache.get(cacheKey);
@@ -108,7 +103,6 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// ---------- المعالج الرئيسي ----------
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('Webhook ready');
 
@@ -119,7 +113,13 @@ module.exports = async (req, res) => {
   const userText = message.text;
   const storeId = req.url.split('/').pop();
 
-  // 1. محاولة جلب الخريطة من MongoDB (إن أمكن)
+  // ✅ إعادة تعيين المحادثة عند كتابة /start
+  if (userText.trim().toLowerCase() === '/start') {
+    sessions.delete(chatId);
+    await sendMessage(chatId, 'أهلاً بك! تم إعادة تشغيل المحادثة.');
+    // سنستمر في الكود أدناه والذي سيبدأ من العقدة الأولى
+  }
+
   let flow = null;
   const database = await connectToMongo();
   if (database) {
@@ -131,7 +131,6 @@ module.exports = async (req, res) => {
     } catch (err) { /* فشل صامت */ }
   }
 
-  // 2. إذا لم توجد خريطة، استخدم الخريطة الاحتياطية للمتجر "test"
   if (!flow) {
     if (storeId === 'test') {
       flow = FALLBACK_MAP;
@@ -143,7 +142,6 @@ module.exports = async (req, res) => {
 
   const { nodes, connections } = flow;
 
-  // 3. إدارة الجلسة
   if (!sessions.has(chatId)) {
     sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
   }
