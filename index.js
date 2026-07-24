@@ -5,7 +5,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-// خريطة احتياطية (تُستخدم فقط إذا تعذّر الاتصال بـ Upstash)
+// خريطة احتياطية (تُستخدم فقط عند تعذّر قراءة Upstash)
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -22,11 +22,9 @@ const FALLBACK_MAP = {
   ]
 };
 
-// جلسات المستخدمين وذاكرة التصنيف المؤقتة
 const sessions = new Map();
 const intentCache = new Map();
 
-// دوال مساعدة
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -67,21 +65,6 @@ function getConnectionTarget(nodeId, connections, nodes) {
 }
 
 module.exports = async (req, res) => {
-  // --- نقطة نهاية مؤقتة لعرض الخريطة المخزنة (للتشخيص) ---
-  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
-    const storeId = req.url.split('/').pop();
-    try {
-      const flow = await kv.get(`map:${storeId}`);
-      if (flow) {
-        return res.status(200).json(flow);
-      } else {
-        return res.status(404).json({ error: 'Map not found' });
-      }
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
   // --- نشر خريطة جديدة من التطبيق (تخزين في Upstash) ---
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
@@ -90,7 +73,7 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Invalid map data' });
     }
     try {
-      // ✅ تخزين الكائن مباشرة (بدون JSON.stringify)
+      // تخزين الكائن مباشرة (بدون JSON.stringify)
       await kv.set(`map:${storeId}`, flowData);
       console.log(`✅ Map stored in Upstash KV for store ${storeId}`);
       return res.status(200).json({ success: true });
@@ -152,18 +135,33 @@ module.exports = async (req, res) => {
         const nextMsg = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextMsg) {
           session.currentNodeId = nextMsg.id;
-          if (nextMsg.prompt) await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
+          if (nextMsg.prompt) {
+            await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
+          } else if (nextMsg.type === 'intent') {
+            // إذا كانت العقدة التالية "تصنيف نية" بدون prompt، نرسل title
+            const question = nextMsg.prompt || nextMsg.title;
+            if (question) await sendMessage(chatId, replaceVariables(question, session.variables));
+          }
         }
         break;
+
       case 'input':
         if (currentNode.variableName) session.variables[currentNode.variableName] = userText;
         const nextInp = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextInp) {
           session.currentNodeId = nextInp.id;
-          if (nextInp.type === 'message') await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
-          else if (nextInp.prompt) await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
+          if (nextInp.type === 'message') {
+            await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
+          } else if (nextInp.type === 'intent') {
+            // إذا كانت العقدة التالية "تصنيف نية"، نرسل prompt إن وُجد، وإلا نرسل title
+            const question = nextInp.prompt || nextInp.title;
+            if (question) await sendMessage(chatId, replaceVariables(question, session.variables));
+          } else if (nextInp.prompt) {
+            await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
+          }
         }
         break;
+
       case 'intent': {
         const options = connections.filter(c => c.from === currentNode.id && c.condition && c.condition !== 'fallback').map(c => c.condition);
         const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
