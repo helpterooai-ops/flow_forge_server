@@ -6,29 +6,49 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-// ---------- اتصال MongoDB (يبقى حياً) ----------
+// ---------- خريطة احتياطية (تُستخدم إذا فشل الاتصال بـ MongoDB) ----------
+const FALLBACK_MAP = {
+  nodes: [
+    { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
+    { id: '2', type: 'input',   title: 'أدخل اسمك', prompt: 'ما اسمك الكريم؟', variableName: 'customer_name', isPaused: false, fallbackNodeId: null },
+    { id: '3', type: 'intent',  title: 'تصنيف الطلب', prompt: 'كيف يمكنني مساعدتك يا {customer_name}؟', variableName: '', isPaused: false, fallbackNodeId: 'fallback' },
+    { id: '4', type: 'message', title: 'حسناً، إليك تفاصيل المساعدة التي طلبتها.', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
+    { id: 'fallback', type: 'message', title: 'عذراً، لم أفهم قصدك. يمكنك طلب "مساعدة" أو "حالة الطلب".', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null }
+  ],
+  connections: [
+    { from: '1', to: '2' },
+    { from: '2', to: '3' },
+    { from: '3', to: '4', condition: 'طلب مساعدة' },
+    { from: '3', to: 'fallback', condition: 'fallback' }
+  ]
+};
+
+// ---------- اتصال MongoDB (سريع، فشل خلال ثانيتين) ----------
 let client;
 let db;
+let mongoAvailable = true; // نفترض أنه متاح حتى يثبت العكس
 
 async function connectToMongo() {
   if (db) return db;
+  if (!mongoAvailable) return null; // إذا فشل سابقاً، لا تحاول مرة أخرى في هذا الطلب
   try {
-    client = new MongoClient(MONGODB_URI);   // استخدام SRV بدون خيارات TLS إضافية
+    client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 2000, connectTimeoutMS: 2000 });
     await client.connect();
     db = client.db('flowforge');
     console.log('✅ MongoDB connected');
     return db;
   } catch (err) {
-    console.error('❌ MongoDB connection error:', err.message);
+    console.error('❌ MongoDB unavailable, using fallback map');
+    mongoAvailable = false; // تعطيل المحاولات اللاحقة (ستُعاد عند إعادة تشغيل الخادم)
     return null;
   }
 }
 
-// جلسات وذاكرة مؤقتة
+// ---------- جلسات وذاكرة مؤقتة ----------
 const sessions = new Map();
 const intentCache = new Map();
 
-// دوال مساعدة
+// ---------- دوال مساعدة ----------
 function getNodeById(id, nodes) {
   return nodes.find(n => n.id === id);
 }
@@ -90,34 +110,42 @@ module.exports = async (req, res) => {
   const userText = message.text;
   const storeId = req.url.split('/').pop();
 
-  // تأكد من الاتصال بقاعدة البيانات
+  // 1. محاولة جلب الخريطة من MongoDB (إن أمكن)
+  let flow = null;
   const database = await connectToMongo();
-  if (!database) {
-    await sendMessage(chatId, 'الخدمة غير متاحة حالياً، حاول لاحقاً.');
+  if (database) {
+    try {
+      const storeDoc = await database.collection('stores').findOne({ storeId: storeId });
+      if (storeDoc && storeDoc.flow) {
+        flow = storeDoc.flow;
+      }
+    } catch (err) { /* فشل صامت */ }
+  }
+
+  // 2. إذا لم توجد خريطة، استخدم الخريطة الاحتياطية للمتجر "test"
+  if (!flow) {
+    if (storeId === 'test') {
+      flow = FALLBACK_MAP;
+    } else {
+      await sendMessage(chatId, 'المتجر غير جاهز بعد.');
+      return res.status(200).end();
+    }
+  }
+
+  const { nodes, connections } = flow;
+
+  // 3. إدارة الجلسة
+  if (!sessions.has(chatId)) {
+    sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
+  }
+  const session = sessions.get(chatId);
+  const currentNode = getNodeById(session.currentNodeId, nodes);
+  if (!currentNode) {
+    await sendMessage(chatId, 'عذراً، فقدت مكانك في المحادثة. اكتب /start للبدء من جديد.');
     return res.status(200).end();
   }
 
   try {
-    const storesCollection = database.collection('stores');
-    const storeDoc = await storesCollection.findOne({ storeId: storeId });
-    if (!storeDoc || !storeDoc.flow) {
-      await sendMessage(chatId, 'المتجر غير جاهز بعد.');
-      return res.status(200).end();
-    }
-
-    const flow = storeDoc.flow;
-    const { nodes, connections } = flow;
-
-    if (!sessions.has(chatId)) {
-      sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
-    }
-    const session = sessions.get(chatId);
-    const currentNode = getNodeById(session.currentNodeId, nodes);
-    if (!currentNode) {
-      await sendMessage(chatId, 'عذراً، فقدت مكانك في المحادثة. اكتب /start للبدء من جديد.');
-      return res.status(200).end();
-    }
-
     switch (currentNode.type) {
       case 'message':
         await sendMessage(chatId, replaceVariables(currentNode.title, session.variables));
