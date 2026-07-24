@@ -5,7 +5,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-// خريطة احتياطية (للمتجر test)
+// خريطة احتياطية (تُستخدم فقط إذا تعذّر الاتصال بـ Upstash)
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -22,10 +22,11 @@ const FALLBACK_MAP = {
   ]
 };
 
-// جلسات وذاكرة مؤقتة
+// جلسات المستخدمين وذاكرة التصنيف المؤقتة
 const sessions = new Map();
 const intentCache = new Map();
 
+// دوال مساعدة
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -70,9 +71,8 @@ module.exports = async (req, res) => {
   if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     try {
-      const raw = await kv.get(`map:${storeId}`);
-      if (raw) {
-        const flow = JSON.parse(raw);
+      const flow = await kv.get(`map:${storeId}`);
+      if (flow) {
         return res.status(200).json(flow);
       } else {
         return res.status(404).json({ error: 'Map not found' });
@@ -82,7 +82,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // --- نقطة النهاية لحفظ الخريطة من التطبيق (تستخدم Upstash KV) ---
+  // --- نشر خريطة جديدة من التطبيق (تخزين في Upstash) ---
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
@@ -90,7 +90,8 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Invalid map data' });
     }
     try {
-      await kv.set(`map:${storeId}`, JSON.stringify(flowData));
+      // ✅ تخزين الكائن مباشرة (بدون JSON.stringify)
+      await kv.set(`map:${storeId}`, flowData);
       console.log(`✅ Map stored in Upstash KV for store ${storeId}`);
       return res.status(200).json({ success: true });
     } catch (err) {
@@ -118,17 +119,14 @@ module.exports = async (req, res) => {
 
   let flow = null;
 
-  // محاولة تحميل الخريطة من Upstash KV
+  // محاولة تحميل الخريطة من Upstash KV (تُرجع الكائن مباشرة)
   try {
-    const raw = await kv.get(`map:${storeId}`);
-    if (raw) {
-      flow = JSON.parse(raw);
-    }
+    flow = await kv.get(`map:${storeId}`);
   } catch (err) {
     console.error('KV read error:', err.message);
   }
 
-  // إذا لم توجد، استخدم الخريطة الاحتياطية
+  // إذا لم نجد خريطة، استخدم الخريطة الاحتياطية
   if (!flow) {
     if (storeId === 'test') flow = FALLBACK_MAP;
     else {
