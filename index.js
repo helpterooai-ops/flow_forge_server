@@ -66,6 +66,22 @@ function getConnectionTarget(nodeId, connections, nodes) {
 }
 
 module.exports = async (req, res) => {
+  // --- نقطة نهاية مؤقتة لعرض الخريطة المخزنة (للتشخيص) ---
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    try {
+      const raw = await kv.get(`map:${storeId}`);
+      if (raw) {
+        const flow = JSON.parse(raw);
+        return res.status(200).json(flow);
+      } else {
+        return res.status(404).json({ error: 'Map not found' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
   // --- نقطة النهاية لحفظ الخريطة من التطبيق (تستخدم Upstash KV) ---
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
