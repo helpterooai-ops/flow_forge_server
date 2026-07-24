@@ -22,9 +22,7 @@ const FALLBACK_MAP = {
   ]
 };
 
-let client;
-let db;
-let mongoAvailable = true;
+let client, db, mongoAvailable = true;
 
 async function connectToMongo() {
   if (db) return db;
@@ -36,7 +34,7 @@ async function connectToMongo() {
     console.log('✅ MongoDB connected');
     return db;
   } catch (err) {
-    console.error('❌ MongoDB unavailable, using fallback map');
+    console.error('❌ MongoDB unavailable, using fallback');
     mongoAvailable = false;
     return null;
   }
@@ -45,17 +43,9 @@ async function connectToMongo() {
 const sessions = new Map();
 const intentCache = new Map();
 
-function getNodeById(id, nodes) {
-  return nodes.find(n => n.id === id);
-}
-
-function replaceVariables(template, vars) {
-  return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || '');
-}
-
-async function sendMessage(chatId, text) {
-  await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text });
-}
+function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
+function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
+async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
 
 function quickKeywordMatch(userText) {
   const t = userText.trim().toLowerCase();
@@ -67,35 +57,24 @@ function quickKeywordMatch(userText) {
 async function classifyIntent(userText, options, userId) {
   const cacheKey = `${userId}::${userText}`;
   if (intentCache.has(cacheKey)) return intentCache.get(cacheKey);
-
   const allOptions = [...options, 'none'];
   const prompt = `صنف النية للرسالة. إذا لم تطابق أي نية، اختر "none". النوايا المتاحة: [${allOptions.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}\n\nالرسالة: "${userText}"`;
-
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
-    const response = await axios.post(url, {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.0 }
-    }, { timeout: 5000 });
-
+    const response = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.0 } }, { timeout: 5000 });
     const raw = response.data.candidates[0].content.parts[0].text;
     const cleaned = raw.replace(/```json|```/g, '').trim();
     const result = JSON.parse(cleaned);
-
     if (result.intent === 'none' || result.confidence < 0.6) {
       const noneResult = { intent: 'none', confidence: 0 };
       if (intentCache.size > 100) intentCache.clear();
       intentCache.set(cacheKey, noneResult);
       return noneResult;
     }
-
     if (intentCache.size > 100) intentCache.clear();
     intentCache.set(cacheKey, result);
     return result;
-  } catch (err) {
-    console.error('Gemini error:', err.message);
-    return null;
-  }
+  } catch (err) { console.error('Gemini error:', err.message); return null; }
 }
 
 function getConnectionTarget(nodeId, connections, nodes) {
@@ -104,7 +83,36 @@ function getConnectionTarget(nodeId, connections, nodes) {
 }
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') return res.status(200).send('Webhook ready');
+  // --- نقطة النهاية لحفظ الخريطة من التطبيق ---
+  if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    const flowData = req.body;
+    if (!flowData || !flowData.nodes || !flowData.connections) {
+      return res.status(400).json({ error: 'Invalid map data' });
+    }
+    const database = await connectToMongo();
+    if (!database) {
+      return res.status(503).json({ error: 'Database unavailable' });
+    }
+    try {
+      const collection = database.collection('stores');
+      await collection.updateOne(
+        { storeId: storeId },
+        { $set: { storeId: storeId, flow: flowData } },
+        { upsert: true }
+      );
+      console.log(`✅ Map updated for store ${storeId}`);
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error('Map save error:', err.message);
+      return res.status(500).json({ error: 'Failed to save map' });
+    }
+  }
+
+  // --- Webhook تيليجرام ---
+  if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
+    return res.status(200).send('Webhook ready');
+  }
 
   const { message } = req.body;
   if (!message || !message.text) return res.status(200).end();
@@ -113,11 +121,9 @@ module.exports = async (req, res) => {
   const userText = message.text;
   const storeId = req.url.split('/').pop();
 
-  // ✅ إعادة تعيين المحادثة عند كتابة /start
   if (userText.trim().toLowerCase() === '/start') {
     sessions.delete(chatId);
     await sendMessage(chatId, 'أهلاً بك! تم إعادة تشغيل المحادثة.');
-    // سنستمر في الكود أدناه والذي سيبدأ من العقدة الأولى
   }
 
   let flow = null;
@@ -125,26 +131,19 @@ module.exports = async (req, res) => {
   if (database) {
     try {
       const storeDoc = await database.collection('stores').findOne({ storeId: storeId });
-      if (storeDoc && storeDoc.flow) {
-        flow = storeDoc.flow;
-      }
-    } catch (err) { /* فشل صامت */ }
+      if (storeDoc && storeDoc.flow) flow = storeDoc.flow;
+    } catch (err) {}
   }
-
   if (!flow) {
-    if (storeId === 'test') {
-      flow = FALLBACK_MAP;
-    } else {
+    if (storeId === 'test') flow = FALLBACK_MAP;
+    else {
       await sendMessage(chatId, 'المتجر غير جاهز بعد.');
       return res.status(200).end();
     }
   }
 
   const { nodes, connections } = flow;
-
-  if (!sessions.has(chatId)) {
-    sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
-  }
+  if (!sessions.has(chatId)) sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
   const session = sessions.get(chatId);
   const currentNode = getNodeById(session.currentNodeId, nodes);
   if (!currentNode) {
@@ -159,44 +158,28 @@ module.exports = async (req, res) => {
         const nextMsg = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextMsg) {
           session.currentNodeId = nextMsg.id;
-          if (nextMsg.prompt) {
-            await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
-          }
+          if (nextMsg.prompt) await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
         }
         break;
-
       case 'input':
-        if (currentNode.variableName) {
-          session.variables[currentNode.variableName] = userText;
-        }
+        if (currentNode.variableName) session.variables[currentNode.variableName] = userText;
         const nextInp = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextInp) {
           session.currentNodeId = nextInp.id;
-          if (nextInp.type === 'message') {
-            await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
-          } else if (nextInp.prompt) {
-            await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
-          }
+          if (nextInp.type === 'message') await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
+          else if (nextInp.prompt) await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
         }
         break;
-
       case 'intent': {
-        const options = connections
-          .filter(c => c.from === currentNode.id && c.condition && c.condition !== 'fallback')
-          .map(c => c.condition);
+        const options = connections.filter(c => c.from === currentNode.id && c.condition && c.condition !== 'fallback').map(c => c.condition);
         const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
-
         let intent = quickKeywordMatch(userText);
-
         if (!intent) {
           const geminiResult = await classifyIntent(userText, options, chatId);
-          if (geminiResult && geminiResult.intent !== 'none' && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent)) {
+          if (geminiResult && geminiResult.intent !== 'none' && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent))
             intent = geminiResult.intent;
-          } else {
-            intent = null;
-          }
+          else intent = null;
         }
-
         if (intent && options.includes(intent)) {
           const matched = connections.find(c => c.from === currentNode.id && c.condition === intent);
           if (matched) {
@@ -213,20 +196,15 @@ module.exports = async (req, res) => {
               session.currentNodeId = fallbackNode.id;
               await sendMessage(chatId, replaceVariables(fallbackNode.title, session.variables));
             }
-          } else {
-            await sendMessage(chatId, 'لم أفهم قصدك، حاول مجدداً.');
-          }
+          } else await sendMessage(chatId, 'لم أفهم قصدك، حاول مجدداً.');
         }
         break;
       }
-
-      default:
-        await sendMessage(chatId, 'نوع عقدة غير معروف.');
+      default: await sendMessage(chatId, 'نوع عقدة غير معروف.');
     }
   } catch (err) {
     console.error('Error:', err.message);
     await sendMessage(chatId, 'حدث خطأ غير متوقع.');
   }
-
   res.status(200).end();
 };
