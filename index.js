@@ -6,22 +6,30 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 
-// اتصال MongoDB (يعاد استخدامه بين الطلبات)
+// ---------- اتصال MongoDB (يحتفظ بالاتصال) ----------
 let client;
 let db;
 
-async function getDb() {
-  if (!client) {
-    client = new MongoClient(MONGODB_URI);
+async function connectToMongo() {
+  if (db) return db;
+  try {
+    client = new MongoClient(MONGODB_URI, {
+      tls: true,
+      tlsAllowInvalidCertificates: false,
+      serverSelectionTimeoutMS: 5000,
+    });
     await client.connect();
     db = client.db('flowforge');
+    console.log('✅ MongoDB connected');
+    return db;
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err.message);
+    return null;
   }
-  return db;
 }
 
-// جلسات المستخدمين
+// جلسات وذاكرة مؤقتة
 const sessions = new Map();
-// ذاكرة مؤقتة للتصنيف
 const intentCache = new Map();
 
 // دوال مساعدة
@@ -34,13 +42,9 @@ function replaceVariables(template, vars) {
 }
 
 async function sendMessage(chatId, text) {
-  await axios.post(TELEGRAM_API + '/sendMessage', {
-    chat_id: chatId,
-    text: text
-  });
+  await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text });
 }
 
-// فلتر كلمات مفتاحية موسع
 function quickKeywordMatch(userText) {
   const t = userText.trim().toLowerCase();
   if (t.includes('مساعدة') || t.includes('دعم') || t.includes('ساعد') || t.includes('الغى') || t.includes('الغي')) return 'طلب مساعدة';
@@ -48,12 +52,9 @@ function quickKeywordMatch(userText) {
   return null;
 }
 
-// Gemini مع ذاكرة مؤقتة
 async function classifyIntent(userText, options, userId) {
   const cacheKey = `${userId}::${userText}`;
-  if (intentCache.has(cacheKey)) {
-    return intentCache.get(cacheKey);
-  }
+  if (intentCache.has(cacheKey)) return intentCache.get(cacheKey);
 
   const prompt = `صنف النية للرسالة. الخيارات: [${options.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}\n\nالرسالة: "${userText}"`;
 
@@ -72,7 +73,7 @@ async function classifyIntent(userText, options, userId) {
     intentCache.set(cacheKey, result);
     return result;
   } catch (err) {
-    console.error('Gemini API error:', err.response?.status, err.message);
+    console.error('Gemini error:', err.message);
     return null;
   }
 }
@@ -82,7 +83,7 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// --------------------- المعالج الرئيسي ---------------------
+// ---------- المعالج الرئيسي ----------
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('Webhook ready');
 
@@ -93,11 +94,15 @@ module.exports = async (req, res) => {
   const userText = message.text;
   const storeId = req.url.split('/').pop();
 
-  try {
-    const database = await getDb();
-    const storesCollection = database.collection('stores');
+  // تأكد من الاتصال بقاعدة البيانات
+  const database = await connectToMongo();
+  if (!database) {
+    await sendMessage(chatId, 'الخدمة غير متاحة حالياً، حاول لاحقاً.');
+    return res.status(200).end();
+  }
 
-    // جلب خريطة المتجر من MongoDB
+  try {
+    const storesCollection = database.collection('stores');
     const storeDoc = await storesCollection.findOne({ storeId: storeId });
     if (!storeDoc || !storeDoc.flow) {
       await sendMessage(chatId, 'المتجر غير جاهز بعد.');
@@ -107,7 +112,6 @@ module.exports = async (req, res) => {
     const flow = storeDoc.flow;
     const { nodes, connections } = flow;
 
-    // جلسة
     if (!sessions.has(chatId)) {
       sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
     }
@@ -189,10 +193,9 @@ module.exports = async (req, res) => {
         await sendMessage(chatId, 'نوع عقدة غير معروف.');
     }
   } catch (err) {
-    console.error('Unexpected error:', err.message);
+    console.error('Error:', err.message);
     await sendMessage(chatId, 'حدث خطأ غير متوقع.');
   }
 
   res.status(200).end();
 };
-
