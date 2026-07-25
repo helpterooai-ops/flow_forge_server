@@ -4,9 +4,9 @@ const { kv } = require('@vercel/kv');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN;   // فقط Vercel Token نحتاجه الآن
 
+// ---------- خريطة احتياطية ----------
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -26,6 +26,7 @@ const FALLBACK_MAP = {
 const sessions = new Map();
 const intentCache = new Map();
 
+// دوال مساعدة (بدون تغيير)
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -67,94 +68,63 @@ function getConnectionTarget(nodeId, connections, nodes) {
 
 module.exports = async (req, res) => {
 
-  // ========== نقطة نشر بوت بايثون ==========
+  // ==================== نقطة النشر المباشر على Vercel ====================
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
-    if (!GITHUB_TOKEN || !VERCEL_TOKEN) {
-      return res.status(500).json({ error: 'رموز النشر غير مهيأة على الخادم' });
+    if (!VERCEL_TOKEN) {
+      return res.status(500).json({ error: 'VERCEL_TOKEN غير مهيأ على الخادم' });
     }
 
     try {
-      const repoName = `telegram-bot-${Date.now()}`;
+      // 1. إنشاء مشروع Vercel جديد (بدون Git)
+      const newProject = await axios.post('https://api.vercel.com/v10/projects',
+        { name: projectName },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+      const projectId = newProject.data.id;
 
-      // 1. إنشاء مستودع GitHub
-      try {
-        const ghRes = await axios.post('https://api.github.com/user/repos',
-          { name: repoName, auto_init: true, private: false },
-          { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
-        );
-        if (ghRes.status !== 201) {
-          return res.status(500).json({ error: `فشل إنشاء مستودع GitHub: ${ghRes.status}` });
-        }
-      } catch (ghErr) {
-        return res.status(500).json({ error: `فشل إنشاء مستودع GitHub: ${ghErr.response?.status} - ${JSON.stringify(ghErr.response?.data)}` });
-      }
-
-      // 2. رفع الملفات
+      // 2. إعداد الملفات المطلوبة بصيغة Base64
       const files = [
-        { path: 'bot.py', content: pythonCode },
-        { path: 'requirements.txt', content: 'python-telegram-bot==20.8' },
-        { path: 'vercel.json', content: JSON.stringify({
+        { file: 'bot.py', data: Buffer.from(pythonCode).toString('base64') },
+        { file: 'requirements.txt', data: Buffer.from('python-telegram-bot==20.8').toString('base64') },
+        { file: 'vercel.json', data: Buffer.from(JSON.stringify({
             builds: [{ src: 'bot.py', use: '@vercel/python' }],
             routes: [{ src: '/(.*)', dest: 'bot.py' }]
-          })
+          })).toString('base64')
         }
       ];
 
-      for (const file of files) {
-        await axios.put(
-          `https://api.github.com/repos/helpterooai-ops/${repoName}/contents/${file.path}`,
-          {
-            message: `Add ${file.path}`,
-            content: Buffer.from(file.content).toString('base64')
-          },
-          { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
-        );
-      }
-
-      // 3. إنشاء مشروع Vercel
-      const vercelProject = await axios.post('https://api.vercel.com/v10/projects',
+      // 3. رفع الملفات مباشرة وإنشاء Deployment
+      const deployment = await axios.post('https://api.vercel.com/v13/deployments',
         {
-          name: repoName,
-          gitRepository: {
-            type: 'github',
-            repo: `helpterooai-ops/${repoName}`
+          name: projectName,
+          project: projectId,
+          target: 'production',
+          files: files,
+          projectSettings: {
+            framework: null  // مهم: لا إطار عمل محدد
           }
         },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
-      const projectId = vercelProject.data.id;
 
-      // 4. تعيين متغير BOT_TOKEN
+      // 4. تعيين متغير البيئة BOT_TOKEN
       await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
         { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // 5. تشغيل النشر
-      await axios.post(`https://api.vercel.com/v13/deployments`,
-        {
-          name: repoName,
-          project: projectId,
-          target: 'production',
-          gitSource: { type: 'github', repoId: vercelProject.data.id, ref: 'main' }
-        },
-        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
-      );
-
-      // 6. انتظار النشر
+      // 5. انتظار النشر ثم جلب النطاق
       await new Promise(resolve => setTimeout(resolve, 8000));
-
-      // 7. جلب النطاق
       const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
-      const domain = projectData.data.alias?.[0]?.domain || `${repoName}.vercel.app`;
+      const domain = projectData.data.alias?.[0]?.domain || `${projectName}.vercel.app`;
 
-      // 8. ضبط Webhook
+      // 6. ضبط Webhook تيليجرام
       await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
 
       return res.status(200).json({ success: true, domain: domain });
@@ -165,7 +135,8 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ========== عرض الخريطة (GET) للتشخيص ==========
+  // ==================== باقي النقاط بدون تغيير ====================
+  // عرض الخريطة (GET)
   if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     try {
@@ -180,7 +151,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ========== نشر خريطة جديدة (POST) ==========
+  // نشر خريطة جديدة (POST)
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
@@ -197,7 +168,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ========== Webhook تيليجرام ==========
+  // Webhook تيليجرام
   if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
     return res.status(200).send('Webhook ready');
   }
