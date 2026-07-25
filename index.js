@@ -7,7 +7,7 @@ const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
-// خريطة احتياطية (تُستخدم فقط إذا تعذّر قراءة Upstash)
+// ---------- خريطة احتياطية ----------
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -24,11 +24,11 @@ const FALLBACK_MAP = {
   ]
 };
 
-// جلسات المستخدمين وذاكرة تصنيف النوايا
+// ---------- جلسات وذاكرة مؤقتة ----------
 const sessions = new Map();
 const intentCache = new Map();
 
-// دوال مساعدة
+// ---------- دوال مساعدة ----------
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -68,9 +68,10 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
+// ---------- المعالج الرئيسي ----------
 module.exports = async (req, res) => {
 
-  // ---------- نقطة النهاية الجديدة لنشر بوت بايثون ----------
+  // ========== نقطة نشر بوت بايثون ==========
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
     if (!projectName || !botToken || !pythonCode) {
@@ -142,7 +143,7 @@ module.exports = async (req, res) => {
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // 6. انتظار النشر (بسيط)
+      // 6. انتظار النشر
       await new Promise(resolve => setTimeout(resolve, 8000));
 
       // 7. جلب النطاق
@@ -161,7 +162,22 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ---------- نقطة نهاية نشر الخريطة (POST) ----------
+  // ========== عرض الخريطة (GET) للتشخيص ==========
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    try {
+      const flow = await kv.get(`map:${storeId}`);
+      if (flow) {
+        return res.status(200).json(flow);
+      } else {
+        return res.status(404).json({ error: 'Map not found' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // ========== نشر خريطة جديدة (POST) ==========
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
@@ -178,22 +194,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ---------- نقطة نهاية عرض الخريطة (GET) للتشخيص ----------
-  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
-    const storeId = req.url.split('/').pop();
-    try {
-      const flow = await kv.get(`map:${storeId}`);
-      if (flow) {
-        return res.status(200).json(flow);
-      } else {
-        return res.status(404).json({ error: 'Map not found' });
-      }
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
-  // ---------- Webhook تيليجرام ----------
+  // ========== Webhook تيليجرام ==========
   if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
     return res.status(200).send('Webhook ready');
   }
