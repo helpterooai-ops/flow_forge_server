@@ -7,7 +7,6 @@ const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
-// ---------- خريطة احتياطية ----------
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -24,11 +23,9 @@ const FALLBACK_MAP = {
   ]
 };
 
-// ---------- جلسات وذاكرة مؤقتة ----------
 const sessions = new Map();
 const intentCache = new Map();
 
-// ---------- دوال مساعدة ----------
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -68,7 +65,6 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// ---------- المعالج الرئيسي ----------
 module.exports = async (req, res) => {
 
   // ========== نقطة نشر بوت بايثون ==========
