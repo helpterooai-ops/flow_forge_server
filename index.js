@@ -81,10 +81,17 @@ module.exports = async (req, res) => {
       const repoName = `telegram-bot-${Date.now()}`;
 
       // 1. إنشاء مستودع GitHub
-      await axios.post('https://api.github.com/user/repos',
-        { name: repoName, auto_init: true, private: false },
-        { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
-      );
+      try {
+        const ghRes = await axios.post('https://api.github.com/user/repos',
+          { name: repoName, auto_init: true, private: false },
+          { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
+        );
+        if (ghRes.status !== 201) {
+          return res.status(500).json({ error: `فشل إنشاء مستودع GitHub: ${ghRes.status}` });
+        }
+      } catch (ghErr) {
+        return res.status(500).json({ error: `فشل إنشاء مستودع GitHub: ${ghErr.response?.status} - ${JSON.stringify(ghErr.response?.data)}` });
+      }
 
       // 2. رفع الملفات
       const files = [
