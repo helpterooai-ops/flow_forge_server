@@ -71,6 +71,7 @@ module.exports = async (req, res) => {
   // ==================== نقطة النشر المباشر على Vercel ====================
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
+    const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 100);
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
@@ -81,7 +82,7 @@ module.exports = async (req, res) => {
     try {
       // 1. إنشاء مشروع Vercel جديد (بدون Git)
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
-        { name: projectName },
+        { name: safeName },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const projectId = newProject.data.id;
@@ -100,7 +101,7 @@ module.exports = async (req, res) => {
       // 3. رفع الملفات مباشرة وإنشاء Deployment
       const deployment = await axios.post('https://api.vercel.com/v13/deployments',
         {
-          name: projectName,
+          name: safeName,
           project: projectId,
           target: 'production',
           files: files,
@@ -122,7 +123,7 @@ module.exports = async (req, res) => {
       const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
-      const domain = projectData.data.alias?.[0]?.domain || `${projectName}.vercel.app`;
+      const domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
 
       // 6. ضبط Webhook تيليجرام
       await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
