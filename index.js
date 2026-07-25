@@ -112,7 +112,6 @@ module.exports = async (req, res) => {
       const vercelProject = await axios.post('https://api.vercel.com/v10/projects',
         {
           name: repoName,
-          framework: 'other',
           gitRepository: {
             type: 'github',
             repo: `helpterooai-ops/${repoName}`
