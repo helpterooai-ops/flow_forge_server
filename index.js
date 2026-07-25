@@ -153,7 +153,7 @@ module.exports = async (req, res) => {
 
       return res.status(200).json({ success: true, domain: domain });
     } catch (err) {
-      const detail = err.response?.data?.message || err.response?.data?.error || err.message;
+      const detail = JSON.stringify(err.response?.data || err.message);
       console.error('Deploy error:', detail);
       return res.status(500).json({ error: `فشل النشر: ${detail}` });
     }
