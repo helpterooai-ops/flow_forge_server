@@ -4,8 +4,10 @@ const { kv } = require('@vercel/kv');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
-// خريطة احتياطية (تُستخدم فقط عند تعذّر قراءة Upstash)
+// خريطة احتياطية (تُستخدم فقط إذا تعذّر قراءة Upstash)
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -22,9 +24,11 @@ const FALLBACK_MAP = {
   ]
 };
 
+// جلسات المستخدمين وذاكرة تصنيف النوايا
 const sessions = new Map();
 const intentCache = new Map();
 
+// دوال مساعدة
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -65,7 +69,99 @@ function getConnectionTarget(nodeId, connections, nodes) {
 }
 
 module.exports = async (req, res) => {
-  // --- نشر خريطة جديدة من التطبيق (تخزين في Upstash) ---
+
+  // ---------- نقطة النهاية الجديدة لنشر بوت بايثون ----------
+  if (req.method === 'POST' && req.url === '/api/v1/deploy') {
+    const { projectName, botToken, pythonCode } = req.body;
+    if (!projectName || !botToken || !pythonCode) {
+      return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
+    }
+    if (!GITHUB_TOKEN || !VERCEL_TOKEN) {
+      return res.status(500).json({ error: 'رموز النشر غير مهيأة على الخادم' });
+    }
+
+    try {
+      const repoName = `telegram-bot-${Date.now()}`;
+
+      // 1. إنشاء مستودع GitHub
+      await axios.post('https://api.github.com/user/repos',
+        { name: repoName, auto_init: true, private: false },
+        { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
+      );
+
+      // 2. رفع الملفات
+      const files = [
+        { path: 'bot.py', content: pythonCode },
+        { path: 'requirements.txt', content: 'python-telegram-bot==20.8' },
+        { path: 'vercel.json', content: JSON.stringify({
+            builds: [{ src: 'bot.py', use: '@vercel/python' }],
+            routes: [{ src: '/(.*)', dest: 'bot.py' }]
+          })
+        }
+      ];
+
+      for (const file of files) {
+        await axios.put(
+          `https://api.github.com/repos/helpterooai-ops/${repoName}/contents/${file.path}`,
+          {
+            message: `Add ${file.path}`,
+            content: Buffer.from(file.content).toString('base64')
+          },
+          { headers: { Authorization: `token ${GITHUB_TOKEN}` } }
+        );
+      }
+
+      // 3. إنشاء مشروع Vercel
+      const vercelProject = await axios.post('https://api.vercel.com/v10/projects',
+        {
+          name: repoName,
+          framework: 'other',
+          gitRepository: {
+            type: 'github',
+            repo: `helpterooai-ops/${repoName}`
+          }
+        },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+      const projectId = vercelProject.data.id;
+
+      // 4. تعيين متغير BOT_TOKEN
+      await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
+        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production'] },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+
+      // 5. تشغيل النشر
+      await axios.post(`https://api.vercel.com/v13/deployments`,
+        {
+          name: repoName,
+          project: projectId,
+          target: 'production',
+          gitSource: { type: 'github', repoId: vercelProject.data.id, ref: 'main' }
+        },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+
+      // 6. انتظار النشر (بسيط)
+      await new Promise(resolve => setTimeout(resolve, 8000));
+
+      // 7. جلب النطاق
+      const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+      const domain = projectData.data.alias?.[0]?.domain || `${repoName}.vercel.app`;
+
+      // 8. ضبط Webhook
+      await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
+
+      return res.status(200).json({ success: true, domain: domain });
+    } catch (err) {
+      console.error('Deploy error:', err.response?.data || err.message);
+      return res.status(500).json({ error: 'فشل النشر التلقائي' });
+    }
+  }
+
+  // ---------- نقطة نهاية نشر الخريطة (POST) ----------
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
@@ -73,7 +169,6 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Invalid map data' });
     }
     try {
-      // تخزين الكائن مباشرة (بدون JSON.stringify)
       await kv.set(`map:${storeId}`, flowData);
       console.log(`✅ Map stored in Upstash KV for store ${storeId}`);
       return res.status(200).json({ success: true });
@@ -83,7 +178,22 @@ module.exports = async (req, res) => {
     }
   }
 
-  // --- Webhook تيليجرام ---
+  // ---------- نقطة نهاية عرض الخريطة (GET) للتشخيص ----------
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    try {
+      const flow = await kv.get(`map:${storeId}`);
+      if (flow) {
+        return res.status(200).json(flow);
+      } else {
+        return res.status(404).json({ error: 'Map not found' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // ---------- Webhook تيليجرام ----------
   if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
     return res.status(200).send('Webhook ready');
   }
@@ -101,15 +211,12 @@ module.exports = async (req, res) => {
   }
 
   let flow = null;
-
-  // محاولة تحميل الخريطة من Upstash KV (تُرجع الكائن مباشرة)
   try {
     flow = await kv.get(`map:${storeId}`);
   } catch (err) {
     console.error('KV read error:', err.message);
   }
 
-  // إذا لم نجد خريطة، استخدم الخريطة الاحتياطية
   if (!flow) {
     if (storeId === 'test') flow = FALLBACK_MAP;
     else {
@@ -135,33 +242,18 @@ module.exports = async (req, res) => {
         const nextMsg = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextMsg) {
           session.currentNodeId = nextMsg.id;
-          if (nextMsg.prompt) {
-            await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
-          } else if (nextMsg.type === 'intent') {
-            // إذا كانت العقدة التالية "تصنيف نية" بدون prompt، نرسل title
-            const question = nextMsg.prompt || nextMsg.title;
-            if (question) await sendMessage(chatId, replaceVariables(question, session.variables));
-          }
+          if (nextMsg.prompt) await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
         }
         break;
-
       case 'input':
         if (currentNode.variableName) session.variables[currentNode.variableName] = userText;
         const nextInp = getConnectionTarget(currentNode.id, connections, nodes);
         if (nextInp) {
           session.currentNodeId = nextInp.id;
-          if (nextInp.type === 'message') {
-            await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
-          } else if (nextInp.type === 'intent') {
-            // إذا كانت العقدة التالية "تصنيف نية"، نرسل prompt إن وُجد، وإلا نرسل title
-            const question = nextInp.prompt || nextInp.title;
-            if (question) await sendMessage(chatId, replaceVariables(question, session.variables));
-          } else if (nextInp.prompt) {
-            await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
-          }
+          if (nextInp.type === 'message') await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
+          else if (nextInp.prompt) await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
         }
         break;
-
       case 'intent': {
         const options = connections.filter(c => c.from === currentNode.id && c.condition && c.condition !== 'fallback').map(c => c.condition);
         const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
