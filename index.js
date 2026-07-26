@@ -115,13 +115,29 @@ module.exports = async (req, res) => {
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
-        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
-      );
-      const domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
+      // انتظر حتى يكتمل النشر (محاولة ضبط Webhook بعدة محاولات)
+      let domain = null;
+      for (let i = 0; i < 5; i++) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+          const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
+            { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+          );
+          domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
+          // إذا كان النطاق متاحًا، نضبط Webhook
+          if (domain) {
+            await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
+            console.log(`Webhook set for ${domain}`);
+            break;
+          }
+        } catch (e) {
+          // استمر في المحاولة
+        }
+      }
 
-      await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
+      if (!domain) {
+        return res.status(500).json({ error: 'لم يتم الحصول على نطاق المشروع' });
+      }
 
       return res.status(200).json({ success: true, domain: domain });
     } catch (err) {
