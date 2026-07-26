@@ -78,11 +78,18 @@ module.exports = async (req, res) => {
       const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
       const safeCode = pythonCode; 
 
+      // 1. إنشاء المشروع
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const projectId = newProject.data.id;
+
+      // 2. إضافة المتغير البيئي (BOT_TOKEN) *قبل* النشر ليقرأه بايثون بشكل صحيح
+      await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
+        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
 
       const vercelJsonConfig = {
         builds: [{ src: "bot.py", use: "@vercel/python" }],
@@ -95,19 +102,16 @@ module.exports = async (req, res) => {
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
+      // 3. نشر الكود مع إرسال المتغير البيئي مباشرة في الطلب كضمان إضافي
       await axios.post('https://api.vercel.com/v13/deployments',
         {
           name: safeName,
           project: projectId,
           target: 'production',
           files: files,
+          env: { BOT_TOKEN: botToken }, // <-- هذا السطر يضمن حقن التوكن بقوة في بيئة Vercel
           projectSettings: { framework: null }
         },
-        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
-      );
-
-      await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
-        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
