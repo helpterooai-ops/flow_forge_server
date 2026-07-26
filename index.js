@@ -88,7 +88,6 @@ module.exports = async (req, res) => {
       );
       const projectId = newProject.data.id;
 
-      // 🛠️ التعديل الجذري هنا: تمرير الملفات كنصوص عادية (Raw Strings) وتوليد vercel.json بشكل ديناميكي
       const vercelJsonConfig = {
         builds: [{ src: "bot.py", use: "@vercel/python" }],
         routes: [{ src: "/(.*)", dest: "bot.py" }]
@@ -96,7 +95,7 @@ module.exports = async (req, res) => {
 
       const files = [
         { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask' },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI' },
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig, null, 2) }
       ];
 
