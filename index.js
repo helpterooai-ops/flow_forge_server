@@ -4,10 +4,7 @@ const { kv } = require('@vercel/kv');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
-const RENDER_API_KEY = process.env.RENDER_API_KEY;
-
-// تخزين مؤقت لـ ownerId لتجنب طلبه كل مرة
-let cachedOwnerId = null;
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
 const FALLBACK_MAP = {
   nodes: [
@@ -67,84 +64,80 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// دالة مساعدة لجلب ownerId
-async function getOwnerId() {
-  if (cachedOwnerId) return cachedOwnerId;
-  const res = await axios.get('https://api.render.com/v1/owners', {
-    headers: { Authorization: `Bearer ${RENDER_API_KEY}` }
-  });
-  if (res.data && res.data.length > 0) {
-    cachedOwnerId = res.data[0].owner.id;
-    return cachedOwnerId;
-  }
-  throw new Error('لم يتم العثور على ownerId');
-}
-
 module.exports = async (req, res) => {
 
-  // ========== نقطة نشر بوت بايثون (عبر Render) ==========
+  // ========== نقطة نشر بوت بايثون (عبر Vercel) ==========
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
-    if (!RENDER_API_KEY) {
-      return res.status(500).json({ error: 'RENDER_API_KEY غير مهيأ على الخادم' });
+    if (!VERCEL_TOKEN) {
+      return res.status(500).json({ error: 'VERCEL_TOKEN غير مهيأ على الخادم' });
     }
 
     try {
-      const safeName = 'bot-' + projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
-      const ownerId = await getOwnerId();
+      const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
+      const safeCode = pythonCode; // بدون أي تعديل
 
-      // إنشاء خدمة Render
-      const renderPayload = {
-        ownerId: ownerId,
-        type: 'web_service',
-        name: safeName,
-        envVars: [
-          { key: 'BOT_TOKEN', value: botToken }
-        ],
-        serviceDetails: {
-          env: 'docker',
-          dockerfilePath: './Dockerfile',
-          dockerContext: '.',
-          plan: 'free'
-        },
-        files: {
-          'Dockerfile': `FROM python:3.10-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD ["python", "bot.py"]`,
-          'bot.py': pythonCode,
-          'requirements.txt': 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI'
-        }
-      };
+      // 1. إنشاء مشروع Vercel
+      const newProject = await axios.post('https://api.vercel.com/v10/projects',
+        { name: safeName },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+      const projectId = newProject.data.id;
 
-      const renderRes = await axios.post('https://api.render.com/v1/services',
-        renderPayload,
-        { headers: { Authorization: `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' } }
+      // 2. حقن التوكن كمتغير بيئة
+      await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
+        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      const serviceId = renderRes.data.id;
+      const vercelJsonConfig = {
+        builds: [{ src: "bot.py", use: "@vercel/python" }],
+        routes: [{ src: "/(.*)", dest: "bot.py" }]
+      };
 
-      // انتظار النشر والحصول على الرابط
-      let serviceUrl = null;
-      for (let i = 0; i < 12; i++) {
-        await new Promise(resolve => setTimeout(resolve, 8000));
-        const statusRes = await axios.get(`https://api.render.com/v1/services/${serviceId}`,
-          { headers: { Authorization: `Bearer ${RENDER_API_KEY}` } }
-        );
-        if (statusRes.data.service && statusRes.data.service.serviceDetails && statusRes.data.service.serviceDetails.url) {
-          serviceUrl = statusRes.data.service.serviceDetails.url;
-          break;
-        }
+      const files = [
+        { file: 'bot.py', data: safeCode },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI' },
+        { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
+      ];
+
+      // 3. نشر الملفات
+      await axios.post('https://api.vercel.com/v13/deployments',
+        {
+          name: safeName,
+          project: projectId,
+          target: 'production',
+          files: files,
+          env: { BOT_TOKEN: botToken },
+          projectSettings: { framework: null }
+        },
+        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      );
+
+      // 4. انتظار النشر وجلب الرابط
+      let domain = null;
+      for (let i = 0; i < 6; i++) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+          const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
+            { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+          );
+          domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
+          if (domain) {
+            await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
+            break;
+          }
+        } catch (e) {}
       }
 
-      if (!serviceUrl) {
-        return res.status(500).json({ error: 'فشل في الحصول على رابط الخدمة من Render' });
+      if (!domain) {
+        return res.status(500).json({ error: 'لم يتم الحصول على نطاق المشروع' });
       }
 
-      // ضبط Webhook تيليجرام
-      await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${serviceUrl}/api/bot`);
-
-      return res.status(200).json({ success: true, domain: serviceUrl });
+      return res.status(200).json({ success: true, domain: domain });
     } catch (err) {
       const detail = JSON.stringify(err.response?.data || err.message);
       console.error('Deploy error:', detail);
