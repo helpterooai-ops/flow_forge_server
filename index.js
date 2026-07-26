@@ -79,7 +79,7 @@ module.exports = async (req, res) => {
     try {
       const safeName = 'bot-' + projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
 
-      // 1. إنشاء خدمة Render (Web Service) باستخدام Dockerfile جاهز
+      // 1. إنشاء خدمة Render (Web Service) مع Dockerfile جاهز
       const renderPayload = {
         type: 'web_service',
         name: safeName,
@@ -95,7 +95,7 @@ module.exports = async (req, res) => {
         files: {
           'Dockerfile': `FROM python:3.10-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD ["python", "bot.py"]`,
           'bot.py': pythonCode,
-          'requirements.txt': 'python-telegram-bot==20.8\nflask'
+          'requirements.txt': 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI'
         }
       };
 
