@@ -88,13 +88,11 @@ module.exports = async (req, res) => {
       );
       const projectId = newProject.data.id;
 
-      // ✅ vercel.json مضمون بصيغة ثابتة
-      const vercelJson = `{"builds":[{"src":"bot.py","use":"@vercel/python"}],"routes":[{"src":"/(.*)","dest":"bot.py"}]}`;
-
+      // ✅ قيمة Base64 ثابتة لـ vercel.json صحيح 100%
       const files = [
         { file: 'bot.py', data: Buffer.from(safeCode).toString('base64') },
         { file: 'requirements.txt', data: Buffer.from('python-telegram-bot==20.8\nflask').toString('base64') },
-        { file: 'vercel.json', data: Buffer.from(vercelJson).toString('base64') }
+        { file: 'vercel.json', data: 'eyJidWlsZHMiOlt7InNyYyI6ImJvdC5weSIsInVzZSI6IkB2ZXJjZWwvcHl0aG9uIn1dLCJyb3V0ZXMiOlt7InNyYyI6Ii8oLiopIiwiZGVzdCI6ImJvdC5weSJ9XX0=' }
       ];
 
       await axios.post('https://api.vercel.com/v13/deployments',
