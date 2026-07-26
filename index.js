@@ -81,7 +81,7 @@ import nest_asyncio
 nest_asyncio.apply()
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application
+from telegram.ext import Application, ApplicationBuilder   # ✅ تمت الإضافة
 
 # إنشاء تطبيق Flask
 app = Flask(__name__)
@@ -192,5 +192,134 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ... (باقي النقاط بدون تغيير: عرض الخريطة، نشر الخريطة، Webhook تيليجرام)
+  // ========== عرض الخريطة (GET) ==========
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    try {
+      const flow = await kv.get(`map:${storeId}`);
+      if (flow) {
+        return res.status(200).json(flow);
+      } else {
+        return res.status(404).json({ error: 'Map not found' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // ========== نشر خريطة جديدة (POST) ==========
+  if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    const flowData = req.body;
+    if (!flowData || !flowData.nodes || !flowData.connections) {
+      return res.status(400).json({ error: 'Invalid map data' });
+    }
+    try {
+      await kv.set(`map:${storeId}`, flowData);
+      console.log(`✅ Map stored in Upstash KV for store ${storeId}`);
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error('KV save error:', err.message);
+      return res.status(503).json({ error: 'Failed to save map' });
+    }
+  }
+
+  // ========== Webhook تيليجرام ==========
+  if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
+    return res.status(200).send('Webhook ready');
+  }
+
+  const { message } = req.body;
+  if (!message || !message.text) return res.status(200).end();
+
+  const chatId = message.chat.id;
+  const userText = message.text;
+  const storeId = req.url.split('/').pop();
+
+  if (userText.trim().toLowerCase() === '/start') {
+    sessions.delete(chatId);
+    await sendMessage(chatId, 'أهلاً بك! تم إعادة تشغيل المحادثة.');
+  }
+
+  let flow = null;
+  try {
+    flow = await kv.get(`map:${storeId}`);
+  } catch (err) {
+    console.error('KV read error:', err.message);
+  }
+
+  if (!flow) {
+    if (storeId === 'test') flow = FALLBACK_MAP;
+    else {
+      await sendMessage(chatId, 'المتجر غير جاهز بعد.');
+      return res.status(200).end();
+    }
+  }
+
+  const { nodes, connections } = flow;
+
+  if (!sessions.has(chatId)) sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
+  const session = sessions.get(chatId);
+  const currentNode = getNodeById(session.currentNodeId, nodes);
+  if (!currentNode) {
+    await sendMessage(chatId, 'عذراً، فقدت مكانك في المحادثة. اكتب /start للبدء من جديد.');
+    return res.status(200).end();
+  }
+
+  try {
+    switch (currentNode.type) {
+      case 'message':
+        await sendMessage(chatId, replaceVariables(currentNode.title, session.variables));
+        const nextMsg = getConnectionTarget(currentNode.id, connections, nodes);
+        if (nextMsg) {
+          session.currentNodeId = nextMsg.id;
+          if (nextMsg.prompt) await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
+        }
+        break;
+      case 'input':
+        if (currentNode.variableName) session.variables[currentNode.variableName] = userText;
+        const nextInp = getConnectionTarget(currentNode.id, connections, nodes);
+        if (nextInp) {
+          session.currentNodeId = nextInp.id;
+          if (nextInp.type === 'message') await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
+          else if (nextInp.prompt) await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
+        }
+        break;
+      case 'intent': {
+        const options = connections.filter(c => c.from === currentNode.id && c.condition && c.condition !== 'fallback').map(c => c.condition);
+        const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
+        let intent = quickKeywordMatch(userText);
+        if (!intent) {
+          const geminiResult = await classifyIntent(userText, options, chatId);
+          if (geminiResult && geminiResult.intent !== 'none' && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent))
+            intent = geminiResult.intent;
+          else intent = null;
+        }
+        if (intent && options.includes(intent)) {
+          const matched = connections.find(c => c.from === currentNode.id && c.condition === intent);
+          if (matched) {
+            const nextNode = getNodeById(matched.to, nodes);
+            if (nextNode) {
+              session.currentNodeId = nextNode.id;
+              await sendMessage(chatId, replaceVariables(nextNode.title, session.variables));
+            }
+          }
+        } else {
+          if (fallbackConn) {
+            const fallbackNode = getNodeById(fallbackConn.to, nodes);
+            if (fallbackNode) {
+              session.currentNodeId = fallbackNode.id;
+              await sendMessage(chatId, replaceVariables(fallbackNode.title, session.variables));
+            }
+          } else await sendMessage(chatId, 'لم أفهم قصدك، حاول مجدداً.');
+        }
+        break;
+      }
+      default: await sendMessage(chatId, 'نوع عقدة غير معروف.');
+    }
+  } catch (err) {
+    console.error('Error:', err.message);
+    await sendMessage(chatId, 'حدث خطأ غير متوقع.');
+  }
+  res.status(200).end();
 };
