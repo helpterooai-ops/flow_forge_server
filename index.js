@@ -100,7 +100,10 @@ module.exports = async (req, res) => {
 
       const files = [
         { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI' },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8
+flask
+pyTelegramBotAPI
+nest-asyncio==1.6.0' },
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
