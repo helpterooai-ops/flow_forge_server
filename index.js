@@ -81,6 +81,7 @@ module.exports = async (req, res) => {
 
       // 1. إنشاء خدمة Render (Web Service) مع Dockerfile جاهز
       const renderPayload = {
+        ownerId: ownerId,
         type: 'web_service',
         name: safeName,
         envVars: [
