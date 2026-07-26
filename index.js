@@ -95,8 +95,8 @@ module.exports = async (req, res) => {
 
       const files = [
         { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI' },
-        { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig, null, 2) }
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask' },
+        { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
       await axios.post('https://api.vercel.com/v13/deployments',
@@ -115,7 +115,6 @@ module.exports = async (req, res) => {
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // انتظر حتى يكتمل النشر (محاولة ضبط Webhook بعدة محاولات)
       let domain = null;
       for (let i = 0; i < 5; i++) {
         await new Promise(resolve => setTimeout(resolve, 5000));
@@ -124,15 +123,11 @@ module.exports = async (req, res) => {
             { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
           );
           domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
-          // إذا كان النطاق متاحًا، نضبط Webhook
           if (domain) {
             await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
-            console.log(`Webhook set for ${domain}`);
             break;
           }
-        } catch (e) {
-          // استمر في المحاولة
-        }
+        } catch (e) {}
       }
 
       if (!domain) {
