@@ -77,60 +77,48 @@ module.exports = async (req, res) => {
     }
 
     try {
-      // ✅ اسم فريد مع طابع زمني
       const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
-
-      // ✅ استبدال النص 'BOT_TOKEN' بطريقة آمنة لقراءة متغير البيئة
       const safeCode = pythonCode
         .replace(/'BOT_TOKEN'/g, "os.environ.get('BOT_TOKEN')")
         .replace(/"BOT_TOKEN"/g, "os.environ.get('BOT_TOKEN')");
 
-      // 1. إنشاء مشروع Vercel جديد (بدون Git)
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const projectId = newProject.data.id;
 
-      // 2. إعداد الملفات بصيغة Base64
+      // ✅ vercel.json مضمون بصيغة ثابتة
+      const vercelJson = `{"builds":[{"src":"bot.py","use":"@vercel/python"}],"routes":[{"src":"/(.*)","dest":"bot.py"}]}`;
+
       const files = [
         { file: 'bot.py', data: Buffer.from(safeCode).toString('base64') },
-        { file: 'requirements.txt', data: Buffer.from('python-telegram-bot==20.8').toString('base64') },
-        { file: 'vercel.json', data: Buffer.from(JSON.stringify({
-            builds: [{ src: 'bot.py', use: '@vercel/python' }],
-            routes: [{ src: '/(.*)', dest: 'bot.py' }]
-          })).toString('base64')
-        }
+        { file: 'requirements.txt', data: Buffer.from('python-telegram-bot==20.8\nflask').toString('base64') },
+        { file: 'vercel.json', data: Buffer.from(vercelJson).toString('base64') }
       ];
 
-      // 3. رفع الملفات مباشرة وإنشاء Deployment
-      const deployment = await axios.post('https://api.vercel.com/v13/deployments',
+      await axios.post('https://api.vercel.com/v13/deployments',
         {
           name: safeName,
           project: projectId,
           target: 'production',
           files: files,
-          projectSettings: {
-            framework: null
-          }
+          projectSettings: { framework: null }
         },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // 4. تعيين متغير البيئة BOT_TOKEN
       await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
         { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // 5. انتظار النشر ثم جلب النطاق
-      await new Promise(resolve => setTimeout(resolve, 8000));
+      await new Promise(resolve => setTimeout(resolve, 10000));
       const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
 
-      // 6. ضبط Webhook تيليجرام
       await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
 
       return res.status(200).json({ success: true, domain: domain });
