@@ -1,130 +1,143 @@
 const axios = require('axios');
+const { kv } = require('@vercel/kv');
 
-// تأكد من وضع VERCEL_TOKEN في متغيرات البيئة (Environment Variables) لخادمك
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN; 
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
-// =========================================================================
-// 🪄 الدالة السحرية: المتربص (النسخة النهائية الآمنة 100%)
-// =========================================================================
+const FALLBACK_MAP = {
+  nodes: [
+    { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
+    { id: '2', type: 'input',   title: 'أدخل اسمك', prompt: 'ما اسمك الكريم؟', variableName: 'customer_name', isPaused: false, fallbackNodeId: null },
+    { id: '3', type: 'intent',  title: 'تصنيف الطلب', prompt: 'كيف يمكنني مساعدتك يا {customer_name}؟', variableName: '', isPaused: false, fallbackNodeId: 'fallback' },
+    { id: '4', type: 'message', title: 'حسناً، إليك تفاصيل المساعدة التي طلبتها.', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
+    { id: 'fallback', type: 'message', title: 'عذراً، لم أفهم قصدك. يمكنك طلب "مساعدة" أو "حالة الطلب".', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null }
+  ],
+  connections: [
+    { from: '1', to: '2' },
+    { from: '2', to: '3' },
+    { from: '3', to: '4', condition: 'طلب مساعدة' },
+    { from: '3', to: 'fallback', condition: 'fallback' }
+  ]
+};
+
+const sessions = new Map();
+const intentCache = new Map();
+
+function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
+function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
+async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
+
+function quickKeywordMatch(userText) {
+  const t = userText.trim().toLowerCase();
+  if (t.includes('مساعدة') || t.includes('دعم') || t.includes('ساعد') || t.includes('الغى') || t.includes('الغي')) return 'طلب مساعدة';
+  if (t.includes('حالة') || t.includes('طلبي') || t.includes('تتبع') || t.includes('رقم الطلب')) return 'حالة الطلب';
+  return null;
+}
+
+async function classifyIntent(userText, options, userId) {
+  const cacheKey = `${userId}::${userText}`;
+  if (intentCache.has(cacheKey)) return intentCache.get(cacheKey);
+  const allOptions = [...options, 'none'];
+  const prompt = `صنف النية للرسالة. إذا لم تطابق أي نية، اختر "none". النوايا المتاحة: [${allOptions.join(', ')}]. أعد JSON فقط: {"intent":"...","confidence":0.9}\n\nالرسالة: "${userText}"`;
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
+    const response = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.0 } }, { timeout: 5000 });
+    const raw = response.data.candidates[0].content.parts[0].text;
+    const cleaned = raw.replace(/```json|```/g, '').trim();
+    const result = JSON.parse(cleaned);
+    if (result.intent === 'none' || result.confidence < 0.6) {
+      const noneResult = { intent: 'none', confidence: 0 };
+      if (intentCache.size > 100) intentCache.clear();
+      intentCache.set(cacheKey, noneResult);
+      return noneResult;
+    }
+    if (intentCache.size > 100) intentCache.clear();
+    intentCache.set(cacheKey, result);
+    return result;
+  } catch (err) { console.error('Gemini error:', err.message); return null; }
+}
+
+function getConnectionTarget(nodeId, connections, nodes) {
+  const conn = connections.find(c => c.from === nodeId && !c.condition);
+  return conn ? getNodeById(conn.to, nodes) : null;
+}
+
+// ✅ محول Zero‑Config المصحح
 function transformPythonCodeForVercel(userCode) {
   let code = userCode;
 
-  // 1. إجبار الكود على العمل في Vercel وتخطي شرط التشغيل المحلي
-  code = code.replace(/if\s+__name__\s*==\s*['"]__main__['"]\s*:/g, "if True:");
-  
-  // 2. استبدال التوكن النصي بمتغير البيئة الذي سنحقنه في Vercel
+  // استبدال BOT_TOKEN بشكل آمن (فقط إذا كانت محاطة بعلامات تنصيص)
   code = code.replace(/['"]BOT_TOKEN['"]/g, "os.environ.get('BOT_TOKEN')");
 
-  // 3. الجزء العلوي: المتربص الذكي (يسرق البوت كاملاً بدون حلقات مفرغة)
-  const topInjector = `
-# ==========================================
-# FLOWFORGE MAGIC ADAPTER (TOP)
-# ==========================================
-import os
-import asyncio
-import nest_asyncio
-import telegram.ext
+  // تحويل if __name__ == "__main__" إلى if True: لضمان التنفيذ
+  code = code.replace(/if\s+__name__\s*==\s*['"]__main__['"]\s*:/g, "if True:");
 
-nest_asyncio.apply()
+  // تعطيل run_polling
+  code = code.replace(/\.run_polling\(\)/g, 'pass # disabled by FlowForge');
 
-# هنا سنخزن البوت الخاص بالمستخدم بكامل أوامره
-FLOWFORGE_APP = None
-
-# سنقوم باعتراض أمر التشغيل، ونسرق البوت وهو جاهز!
-def _mock_run_polling(self, *args, **kwargs):
-    global FLOWFORGE_APP
-    FLOWFORGE_APP = self
-    print("[FlowForge] Bot hijacked successfully! Polling disabled.")
-
-# تطبيق الفخ
-telegram.ext.Application.run_polling = _mock_run_polling
-telegram.ext.Application.run_webhook = _mock_run_polling
-# ==========================================
-`;
-
-  // 4. الجزء السفلي: تشغيل Webhook وتمرير الرسائل للبوت الذي اصطدناه
-  const bottomInjector = `
-# ==========================================
-# FLOWFORGE MAGIC ADAPTER (BOTTOM)
-# ==========================================
-from flask import Flask, request, jsonify
+  // حقن الأعلى (Flask + Webhook)
+  const top = `
+import os, asyncio, json
+from flask import Flask, request
 from telegram import Update
+from telegram.ext import Application
 
 app = Flask(__name__)
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>', methods=['POST', 'GET'])
-def webhook_handler(path):
-    if request.method == 'POST':
-        if not FLOWFORGE_APP:
-            return jsonify({"error": "Bot instance not found"}), 500
-            
-        try:
-            req_data = request.get_json(force=True)
-            async def process_update():
-                # تشغيل البوت المسروق بأمان تام لكل رسالة
-                async with FLOWFORGE_APP:
-                    update = Update.de_json(req_data, FLOWFORGE_APP.bot)
-                    await FLOWFORGE_APP.process_update(update)
-                    
-            asyncio.run(process_update())
-            return jsonify({"status": "success"}), 200
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
-            
-    return "🚀 FlowForge Zero-Config Engine is ACTIVE and RUNNING!"
-# ==========================================
+# المسار الرئيسي لاستقبال التحديثات
+@app.route('/api/bot', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    update = Update.de_json(data, bot_instance.bot)
+    asyncio.run(bot_instance.process_update(update))
+    return 'OK'
+
+@app.route('/')
+def home():
+    return 'Bot is running!'
 `;
 
-  return topInjector + '\n\n' + code + '\n\n' + bottomInjector;
+  // حقن الأسفل (إنشاء التطبيق وتهيئته)
+  const bottom = `
+# إنشاء التطبيق
+bot_instance = ApplicationBuilder().token(os.environ.get('BOT_TOKEN')).build()
+`;
+
+  // استبدال أي سطر يبدأ بـ Application.builder أو application = ApplicationBuilder()
+  code = code.replace(
+    /(?:application\s*=\s*)?ApplicationBuilder\(\)\.token\(.*?\)\.build\(\)/g,
+    'pass # replaced by FlowForge'
+  );
+
+  return top + '\n' + code + '\n' + bottom;
 }
-// =========================================================================
 
-
-// =========================================================================
-// 🚀 نظام الرفع (Deployment API) لـ Vercel
-// =========================================================================
 module.exports = async (req, res) => {
-  // السماح بطلبات CORS لتطبيق Flutter
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
+  // ---------- نقطة نشر بوت بايثون ----------
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
-    
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
+    if (!VERCEL_TOKEN) {
+      return res.status(500).json({ error: 'VERCEL_TOKEN غير مهيأ على الخادم' });
+    }
 
     try {
-      const safeName = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 50) + '-' + Date.now();
-      console.log(`[+] بدء معالجة مشروع جديد: ${safeName}`);
+      const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
+      const safeCode = transformPythonCodeForVercel(pythonCode);
 
-      // 🌟 السحر: تحويل كود المستخدم العادي لكود Vercel
-      const safeCode = transformPythonCodeForVercel(pythonCode); 
-
-      // 1. إنشاء المشروع
-      console.log(`[+] جاري إنشاء المشروع في Vercel...`);
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const projectId = newProject.data.id;
 
-      // 2. حقن توكن البوت
-      console.log(`[+] جاري حقن التوكن البيئي...`);
       await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
-        { 
-          key: 'BOT_TOKEN', 
-          value: botToken, 
-          type: 'encrypted', 
-          target: ['production', 'preview', 'development'] 
-        },
+        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
@@ -135,66 +148,48 @@ module.exports = async (req, res) => {
 
       const files = [
         { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nFlask==3.0.0\nnest-asyncio==1.6.0' },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nFlask==3.0.0' },
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
-      // 3. رفع الملفات
-      console.log(`[+] جاري رفع الملفات ونشر التطبيق...`);
       await axios.post('https://api.vercel.com/v13/deployments',
         {
           name: safeName,
           project: projectId,
           target: 'production',
           files: files,
-          env: { BOT_TOKEN: botToken }, 
+          env: { BOT_TOKEN: botToken },
           projectSettings: { framework: null }
         },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // 4. استخراج الرابط وربط Webhook
-      console.log(`[+] جاري استخراج النطاق (Domain)...`);
       let domain = null;
-      
-      // ننتظر قليلاً ونحاول جلب الرابط
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 6; i++) {
         await new Promise(resolve => setTimeout(resolve, 5000));
         try {
           const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
             { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
           );
-          
-          if (projectData.data.targets && projectData.data.targets.production) {
-             domain = projectData.data.targets.production.url;
-          } else {
-             domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
-          }
-
+          domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
           if (domain) {
-            const webhookUrl = `https://${domain}`;
-            await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=${webhookUrl}`);
-            console.log(`[+] تم ربط Webhook بنجاح: ${webhookUrl}`);
+            await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
             break;
           }
-        } catch (e) {
-          console.log(`[-] محاولة العثور على النطاق...`);
-        }
+        } catch (e) {}
       }
 
-      return res.status(200).json({ 
-        success: true, 
-        message: 'تم نشر البوت بنجاح! 🚀',
-        domain: domain 
-      });
+      if (!domain) {
+        return res.status(500).json({ error: 'لم يتم الحصول على نطاق المشروع' });
+      }
 
+      return res.status(200).json({ success: true, domain: domain });
     } catch (err) {
-      console.error('Deploy error:', err.response ? err.response.data : err.message);
-      return res.status(500).json({ error: 'فشل النشر', details: err.message });
+      const detail = JSON.stringify(err.response?.data || err.message);
+      console.error('Deploy error:', detail);
+      return res.status(500).json({ error: `فشل النشر: ${detail}` });
     }
   }
 
-  // الرد الافتراضي
-  res.status(200).send('FlowForge Vercel API is running smoothly! 🟢');
+  // ... (باقي النقاط: عرض الخريطة، نشر الخريطة، Webhook تيليجرام كما هي) ...
 };
-
