@@ -64,29 +64,22 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// ✅ المحول الذكي المضمون
+// ✅ المحول النهائي المضمون
 function transformPythonCodeForVercel(userCode) {
-  let code = userCode;
-
-  // استبدال 'BOT_TOKEN' مرة واحدة فقط (حولها إلى os.environ.get)
-  code = code.replace(/['"]BOT_TOKEN['"]/g, "os.environ.get('BOT_TOKEN')");
-
-  // تعطيل run_polling
-  code = code.replace(/\.run_polling\(\)/g, 'pass  # disabled by FlowForge');
-
-  // حقن الأعلى (Flask + تطبيق البوت)
-  const top = `
-import os, asyncio, json
+  // إضافة الاستيرادات الأساسية في الأعلى
+  const imports = `import os, asyncio, json
 import nest_asyncio
 nest_asyncio.apply()
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, ApplicationBuilder   # ✅ تمت الإضافة
+from telegram.ext import Application, ApplicationBuilder
 
-# إنشاء تطبيق Flask
+`;
+
+  // إعداد Flask
+  const flaskSetup = `
 app = Flask(__name__)
 
-# المسار الرئيسي
 @app.route('/api/bot', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -98,21 +91,29 @@ def webhook():
 def home():
     return 'Bot is running!'
 
-# تحويل كود المستخدم: إيجاد البوت وإنشاء متغير bot_instance
 `;
 
-  // استبدال إنشاء التطبيق بالتقاطه
-  code = code.replace(
-    /(\w+)\s*=\s*ApplicationBuilder\(\)\.token\(.*?\)\.build\(\)/g,
-    '$1 = ApplicationBuilder().token(os.environ.get("BOT_TOKEN")).build()\nbot_instance = $1'
-  );
+  // تجهيز كود المستخدم
+  let code = userCode;
+  
+  // تعطيل run_polling
+  code = code.replace(/\.run_polling\(\)/g, 'pass  # disabled by FlowForge');
+  
+  // استبدال BOT_TOKEN بشكل آمن
+  code = code.replace(/['"]BOT_TOKEN['"]/g, "os.environ.get('BOT_TOKEN')");
 
-  // إذا لم يتم العثور على bot_instance، أضف سطراً افتراضياً
-  if (!code.includes('bot_instance')) {
+  // حقن إنشاء البوت الإفتراضي إذا لم يكن موجوداً
+  if (!code.includes('ApplicationBuilder()')) {
     code += '\nbot_instance = ApplicationBuilder().token(os.environ.get("BOT_TOKEN")).build()\n';
+  } else {
+    // التقاط المتغير الذي يحمل البوت وتسميته bot_instance
+    code = code.replace(
+      /(\w+)\s*=\s*ApplicationBuilder\(\)\.token\(.*?\)\.build\(\)/g,
+      '$1 = ApplicationBuilder().token(os.environ.get("BOT_TOKEN")).build()\nbot_instance = $1'
+    );
   }
 
-  return top + '\n' + code;
+  return imports + flaskSetup + code;
 }
 
 module.exports = async (req, res) => {
