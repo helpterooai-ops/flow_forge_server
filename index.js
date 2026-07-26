@@ -4,9 +4,8 @@ const { kv } = require('@vercel/kv');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN;   // فقط Vercel Token نحتاجه الآن
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
-// ---------- خريطة احتياطية ----------
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -26,7 +25,6 @@ const FALLBACK_MAP = {
 const sessions = new Map();
 const intentCache = new Map();
 
-// دوال مساعدة (بدون تغيير)
 function getNodeById(id, nodes) { return nodes.find(n => n.id === id); }
 function replaceVariables(template, vars) { return template.replace(/\{(\w+)\}/g, (_, key) => vars[key] || ''); }
 async function sendMessage(chatId, text) { await axios.post(TELEGRAM_API + '/sendMessage', { chat_id: chatId, text: text }); }
@@ -68,10 +66,9 @@ function getConnectionTarget(nodeId, connections, nodes) {
 
 module.exports = async (req, res) => {
 
-  // ==================== نقطة النشر المباشر على Vercel ====================
+  // ========== نقطة نشر بوت بايثون ==========
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
-    const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 100);
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
@@ -80,6 +77,14 @@ module.exports = async (req, res) => {
     }
 
     try {
+      // ✅ اسم فريد مع طابع زمني
+      const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
+
+      // ✅ استبدال النص 'BOT_TOKEN' بطريقة آمنة لقراءة متغير البيئة
+      const safeCode = pythonCode
+        .replace(/'BOT_TOKEN'/g, "os.environ.get('BOT_TOKEN')")
+        .replace(/"BOT_TOKEN"/g, "os.environ.get('BOT_TOKEN')");
+
       // 1. إنشاء مشروع Vercel جديد (بدون Git)
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
@@ -87,9 +92,9 @@ module.exports = async (req, res) => {
       );
       const projectId = newProject.data.id;
 
-      // 2. إعداد الملفات المطلوبة بصيغة Base64
+      // 2. إعداد الملفات بصيغة Base64
       const files = [
-        { file: 'bot.py', data: Buffer.from(pythonCode).toString('base64') },
+        { file: 'bot.py', data: Buffer.from(safeCode).toString('base64') },
         { file: 'requirements.txt', data: Buffer.from('python-telegram-bot==20.8').toString('base64') },
         { file: 'vercel.json', data: Buffer.from(JSON.stringify({
             builds: [{ src: 'bot.py', use: '@vercel/python' }],
@@ -106,7 +111,7 @@ module.exports = async (req, res) => {
           target: 'production',
           files: files,
           projectSettings: {
-            framework: null  // مهم: لا إطار عمل محدد
+            framework: null
           }
         },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
@@ -136,8 +141,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ==================== باقي النقاط بدون تغيير ====================
-  // عرض الخريطة (GET)
+  // ========== عرض الخريطة (GET) ==========
   if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     try {
@@ -152,7 +156,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // نشر خريطة جديدة (POST)
+  // ========== نشر خريطة جديدة (POST) ==========
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
@@ -169,7 +173,7 @@ module.exports = async (req, res) => {
     }
   }
 
-  // Webhook تيليجرام
+  // ========== Webhook تيليجرام ==========
   if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
     return res.status(200).send('Webhook ready');
   }
