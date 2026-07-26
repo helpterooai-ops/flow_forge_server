@@ -6,6 +6,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 
+// تخزين مؤقت لـ ownerId لتجنب طلبه كل مرة
+let cachedOwnerId = null;
+
 const FALLBACK_MAP = {
   nodes: [
     { id: '1', type: 'message', title: 'مرحباً بك في بوت FlowForge!', prompt: '', variableName: '', isPaused: false, fallbackNodeId: null },
@@ -64,6 +67,19 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
+// دالة مساعدة لجلب ownerId
+async function getOwnerId() {
+  if (cachedOwnerId) return cachedOwnerId;
+  const res = await axios.get('https://api.render.com/v1/owners', {
+    headers: { Authorization: `Bearer ${RENDER_API_KEY}` }
+  });
+  if (res.data && res.data.length > 0) {
+    cachedOwnerId = res.data[0].owner.id;
+    return cachedOwnerId;
+  }
+  throw new Error('لم يتم العثور على ownerId');
+}
+
 module.exports = async (req, res) => {
 
   // ========== نقطة نشر بوت بايثون (عبر Render) ==========
@@ -78,8 +94,9 @@ module.exports = async (req, res) => {
 
     try {
       const safeName = 'bot-' + projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
+      const ownerId = await getOwnerId();
 
-      // 1. إنشاء خدمة Render (Web Service) مع Dockerfile جاهز
+      // إنشاء خدمة Render
       const renderPayload = {
         ownerId: ownerId,
         type: 'web_service',
@@ -107,7 +124,7 @@ module.exports = async (req, res) => {
 
       const serviceId = renderRes.data.id;
 
-      // 2. انتظار النشر والحصول على الرابط
+      // انتظار النشر والحصول على الرابط
       let serviceUrl = null;
       for (let i = 0; i < 12; i++) {
         await new Promise(resolve => setTimeout(resolve, 8000));
@@ -124,7 +141,7 @@ module.exports = async (req, res) => {
         return res.status(500).json({ error: 'فشل في الحصول على رابط الخدمة من Render' });
       }
 
-      // 3. ضبط Webhook تيليجرام
+      // ضبط Webhook تيليجرام
       await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${serviceUrl}/api/bot`);
 
       return res.status(200).json({ success: true, domain: serviceUrl });
