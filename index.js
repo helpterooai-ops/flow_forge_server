@@ -64,9 +64,35 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
+// =========================================================================
+// الدالة السحرية: معالجة كود بايثون تلقائياً ليناسب بيئة Vercel (بدون علم المستخدم)
+// =========================================================================
+function transformPythonCodeForVercel(userCode) {
+  let transformedCode = userCode;
+
+  // 1. التأكد من وجود مكتبة os لقراءة المتغيرات البيئية
+  if (!transformedCode.includes('import os')) {
+    transformedCode = `import os\n` + transformedCode;
+  }
+
+  // 2. استبدال الكلمة الدلالية "BOT_TOKEN" أو 'BOT_TOKEN' بالدالة التي تقرأ التوكن من Vercel
+  transformedCode = transformedCode.replace(/['"]BOT_TOKEN['"]/g, "os.environ.get('BOT_TOKEN')");
+
+  // 3. تدمير دوال الـ Polling التي تسبب أخطاء في Vercel عن طريق تحويلها لتعليقات
+  transformedCode = transformedCode.replace(/.*\.start_polling.*/g, "# Removed by FlowForge (Vercel Webhook optimization)");
+  transformedCode = transformedCode.replace(/.*\.idle.*/g, "# Removed by FlowForge (Vercel Webhook optimization)");
+  transformedCode = transformedCode.replace(/.*\.run_polling.*/g, "# Removed by FlowForge (Vercel Webhook optimization)");
+
+  return transformedCode;
+}
+// =========================================================================
+
+
 module.exports = async (req, res) => {
+  // نقطة النهاية الخاصة بنشر الكود على Vercel
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
+    
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
@@ -76,16 +102,18 @@ module.exports = async (req, res) => {
 
     try {
       const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
-      const safeCode = pythonCode; 
+      
+      // هنا نقوم بتمرير كود المستخدم عبر المُعالج الذكي
+      const safeCode = transformPythonCodeForVercel(pythonCode); 
 
-      // 1. إنشاء المشروع
+      // 1. إنشاء المشروع في Vercel
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const projectId = newProject.data.id;
 
-      // 2. إضافة المتغير البيئي (BOT_TOKEN) *قبل* النشر ليقرأه بايثون بشكل صحيح
+      // 2. حفظ التوكن كمتغير بيئي في Vercel
       await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
         { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
@@ -102,14 +130,14 @@ module.exports = async (req, res) => {
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
-      // 3. نشر الكود مع إرسال المتغير البيئي مباشرة في الطلب كضمان إضافي
+      // 3. النشر مع حقن التوكن في بيئة النشر كضمان
       await axios.post('https://api.vercel.com/v13/deployments',
         {
           name: safeName,
           project: projectId,
           target: 'production',
           files: files,
-          env: { BOT_TOKEN: botToken }, // <-- هذا السطر يضمن حقن التوكن بقوة في بيئة Vercel
+          env: { BOT_TOKEN: botToken }, 
           projectSettings: { framework: null }
         },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
@@ -124,6 +152,7 @@ module.exports = async (req, res) => {
           );
           domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
           if (domain) {
+            // ربط الويب هوك الخاص بتليجرام بنطاق Vercel الجديد
             await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
             break;
           }
@@ -142,6 +171,10 @@ module.exports = async (req, res) => {
     }
   }
 
+  // ==========================================
+  // مسارات التعامل مع الخرائط (Flows) والمحادثات
+  // ==========================================
+  
   if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     try {
