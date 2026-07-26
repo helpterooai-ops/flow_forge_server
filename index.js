@@ -65,8 +65,6 @@ function getConnectionTarget(nodeId, connections, nodes) {
 }
 
 module.exports = async (req, res) => {
-
-  // ========== نقطة نشر بوت بايثون ==========
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
     if (!projectName || !botToken || !pythonCode) {
@@ -78,9 +76,7 @@ module.exports = async (req, res) => {
 
     try {
       const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
-      const safeCode = pythonCode
-        .replace(/'BOT_TOKEN'/g, "os.environ.get('BOT_TOKEN')")
-        .replace(/"BOT_TOKEN"/g, "os.environ.get('BOT_TOKEN')");
+      const safeCode = pythonCode; 
 
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
@@ -95,7 +91,7 @@ module.exports = async (req, res) => {
 
       const files = [
         { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask' },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nFlask==3.0.0\nnest-asyncio==1.6.0' },
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
@@ -111,12 +107,12 @@ module.exports = async (req, res) => {
       );
 
       await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
-        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production'] },
+        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
       let domain = null;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 6; i++) {
         await new Promise(resolve => setTimeout(resolve, 5000));
         try {
           const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
@@ -142,7 +138,6 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ========== عرض الخريطة (GET) ==========
   if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     try {
@@ -157,7 +152,6 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ========== نشر خريطة جديدة (POST) ==========
   if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
     const storeId = req.url.split('/').pop();
     const flowData = req.body;
@@ -174,7 +168,6 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ========== Webhook تيليجرام ==========
   if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
     return res.status(200).send('Webhook ready');
   }
@@ -273,3 +266,4 @@ module.exports = async (req, res) => {
   }
   res.status(200).end();
 };
+
