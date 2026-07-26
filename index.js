@@ -88,11 +88,16 @@ module.exports = async (req, res) => {
       );
       const projectId = newProject.data.id;
 
-      // ✅ قيمة Base64 ثابتة لـ vercel.json صحيح 100%
+      // 🛠️ التعديل الجذري هنا: تمرير الملفات كنصوص عادية (Raw Strings) وتوليد vercel.json بشكل ديناميكي
+      const vercelJsonConfig = {
+        builds: [{ src: "bot.py", use: "@vercel/python" }],
+        routes: [{ src: "/(.*)", dest: "bot.py" }]
+      };
+
       const files = [
-        { file: 'bot.py', data: Buffer.from(safeCode).toString('base64') },
-        { file: 'requirements.txt', data: Buffer.from('python-telegram-bot==20.8\nflask').toString('base64') },
-        { file: 'vercel.json', data: 'eyJidWlsZHMiOlt7InNyYyI6ImJvdC5weSIsInVzZSI6IkB2ZXJjZWwvcHl0aG9uIn1dLCJyb3V0ZXMiOlt7InNyYyI6Ii8oLiopIiwiZGVzdCI6ImJvdC5weSJ9XX0=' }
+        { file: 'bot.py', data: safeCode },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask' },
+        { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig, null, 2) }
       ];
 
       await axios.post('https://api.vercel.com/v13/deployments',
