@@ -4,7 +4,7 @@ const { kv } = require('@vercel/kv');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const TELEGRAM_API = 'https://api.telegram.org/bot' + BOT_TOKEN;
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
+const RENDER_API_KEY = process.env.RENDER_API_KEY;
 
 const FALLBACK_MAP = {
   nodes: [
@@ -64,126 +64,69 @@ function getConnectionTarget(nodeId, connections, nodes) {
   return conn ? getNodeById(conn.to, nodes) : null;
 }
 
-// ✅ محول Zero‑Config المصحح
-function transformPythonCodeForVercel(userCode) {
-  let code = userCode;
-
-  // استبدال BOT_TOKEN بشكل آمن (فقط إذا كانت محاطة بعلامات تنصيص)
-  code = code.replace(/['"]BOT_TOKEN['"]/g, "os.environ.get('BOT_TOKEN')");
-
-  // تحويل if __name__ == "__main__" إلى if True: لضمان التنفيذ
-  code = code.replace(/if\s+__name__\s*==\s*['"]__main__['"]\s*:/g, "if True:");
-
-  // تعطيل run_polling
-  code = code.replace(/\.run_polling\(\)/g, 'pass # disabled by FlowForge');
-
-  // حقن الأعلى (Flask + Webhook)
-  const top = `
-import os, asyncio, json
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application
-
-app = Flask(__name__)
-
-# المسار الرئيسي لاستقبال التحديثات
-@app.route('/api/bot', methods=['POST'])
-def webhook():
-    data = request.get_json()
-    update = Update.de_json(data, bot_instance.bot)
-    asyncio.run(bot_instance.process_update(update))
-    return 'OK'
-
-@app.route('/')
-def home():
-    return 'Bot is running!'
-`;
-
-  // حقن الأسفل (إنشاء التطبيق وتهيئته)
-  const bottom = `
-# إنشاء التطبيق
-bot_instance = ApplicationBuilder().token(os.environ.get('BOT_TOKEN')).build()
-`;
-
-  // استبدال أي سطر يبدأ بـ Application.builder أو application = ApplicationBuilder()
-  code = code.replace(
-    /(?:application\s*=\s*)?ApplicationBuilder\(\)\.token\(.*?\)\.build\(\)/g,
-    'pass # replaced by FlowForge'
-  );
-
-  return top + '\n' + code + '\n' + bottom;
-}
-
 module.exports = async (req, res) => {
 
-  // ---------- نقطة نشر بوت بايثون ----------
+  // ========== نقطة نشر بوت بايثون (عبر Render) ==========
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
     if (!projectName || !botToken || !pythonCode) {
       return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     }
-    if (!VERCEL_TOKEN) {
-      return res.status(500).json({ error: 'VERCEL_TOKEN غير مهيأ على الخادم' });
+    if (!RENDER_API_KEY) {
+      return res.status(500).json({ error: 'RENDER_API_KEY غير مهيأ على الخادم' });
     }
 
     try {
-      const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
-      const safeCode = transformPythonCodeForVercel(pythonCode);
+      const safeName = 'bot-' + projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
 
-      const newProject = await axios.post('https://api.vercel.com/v10/projects',
-        { name: safeName },
-        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
-      );
-      const projectId = newProject.data.id;
-
-      await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
-        { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
-        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
-      );
-
-      const vercelJsonConfig = {
-        builds: [{ src: "bot.py", use: "@vercel/python" }],
-        routes: [{ src: "/(.*)", dest: "bot.py" }]
+      // 1. إنشاء خدمة Render (Web Service) باستخدام Dockerfile جاهز
+      const renderPayload = {
+        type: 'web_service',
+        name: safeName,
+        envVars: [
+          { key: 'BOT_TOKEN', value: botToken }
+        ],
+        serviceDetails: {
+          env: 'docker',
+          dockerfilePath: './Dockerfile',
+          dockerContext: '.',
+          plan: 'free'
+        },
+        files: {
+          'Dockerfile': `FROM python:3.10-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD ["python", "bot.py"]`,
+          'bot.py': pythonCode,
+          'requirements.txt': 'python-telegram-bot==20.8\nflask'
+        }
       };
 
-      const files = [
-        { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nFlask==3.0.0' },
-        { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
-      ];
-
-      await axios.post('https://api.vercel.com/v13/deployments',
-        {
-          name: safeName,
-          project: projectId,
-          target: 'production',
-          files: files,
-          env: { BOT_TOKEN: botToken },
-          projectSettings: { framework: null }
-        },
-        { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+      const renderRes = await axios.post('https://api.render.com/v1/services',
+        renderPayload,
+        { headers: { Authorization: `Bearer ${RENDER_API_KEY}`, 'Content-Type': 'application/json' } }
       );
 
-      let domain = null;
-      for (let i = 0; i < 6; i++) {
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        try {
-          const projectData = await axios.get(`https://api.vercel.com/v10/projects/${projectId}`,
-            { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
-          );
-          domain = projectData.data.alias?.[0]?.domain || `${safeName}.vercel.app`;
-          if (domain) {
-            await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${domain}/api/bot`);
-            break;
-          }
-        } catch (e) {}
+      const serviceId = renderRes.data.id;
+
+      // 2. انتظار النشر والحصول على الرابط
+      let serviceUrl = null;
+      for (let i = 0; i < 12; i++) {
+        await new Promise(resolve => setTimeout(resolve, 8000));
+        const statusRes = await axios.get(`https://api.render.com/v1/services/${serviceId}`,
+          { headers: { Authorization: `Bearer ${RENDER_API_KEY}` } }
+        );
+        if (statusRes.data.service && statusRes.data.service.serviceDetails && statusRes.data.service.serviceDetails.url) {
+          serviceUrl = statusRes.data.service.serviceDetails.url;
+          break;
+        }
       }
 
-      if (!domain) {
-        return res.status(500).json({ error: 'لم يتم الحصول على نطاق المشروع' });
+      if (!serviceUrl) {
+        return res.status(500).json({ error: 'فشل في الحصول على رابط الخدمة من Render' });
       }
 
-      return res.status(200).json({ success: true, domain: domain });
+      // 3. ضبط Webhook تيليجرام
+      await axios.get(`https://api.telegram.org/bot${botToken}/setWebhook?url=https://${serviceUrl}/api/bot`);
+
+      return res.status(200).json({ success: true, domain: serviceUrl });
     } catch (err) {
       const detail = JSON.stringify(err.response?.data || err.message);
       console.error('Deploy error:', detail);
@@ -191,5 +134,134 @@ module.exports = async (req, res) => {
     }
   }
 
-  // ... (باقي النقاط: عرض الخريطة، نشر الخريطة، Webhook تيليجرام كما هي) ...
+  // ========== عرض الخريطة (GET) ==========
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    try {
+      const flow = await kv.get(`map:${storeId}`);
+      if (flow) {
+        return res.status(200).json(flow);
+      } else {
+        return res.status(404).json({ error: 'Map not found' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // ========== نشر خريطة جديدة (POST) ==========
+  if (req.method === 'POST' && req.url.startsWith('/api/v1/maps/')) {
+    const storeId = req.url.split('/').pop();
+    const flowData = req.body;
+    if (!flowData || !flowData.nodes || !flowData.connections) {
+      return res.status(400).json({ error: 'Invalid map data' });
+    }
+    try {
+      await kv.set(`map:${storeId}`, flowData);
+      console.log(`✅ Map stored in Upstash KV for store ${storeId}`);
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error('KV save error:', err.message);
+      return res.status(503).json({ error: 'Failed to save map' });
+    }
+  }
+
+  // ========== Webhook تيليجرام ==========
+  if (req.method !== 'POST' || !req.url.includes('/webhooks/telegram/')) {
+    return res.status(200).send('Webhook ready');
+  }
+
+  const { message } = req.body;
+  if (!message || !message.text) return res.status(200).end();
+
+  const chatId = message.chat.id;
+  const userText = message.text;
+  const storeId = req.url.split('/').pop();
+
+  if (userText.trim().toLowerCase() === '/start') {
+    sessions.delete(chatId);
+    await sendMessage(chatId, 'أهلاً بك! تم إعادة تشغيل المحادثة.');
+  }
+
+  let flow = null;
+  try {
+    flow = await kv.get(`map:${storeId}`);
+  } catch (err) {
+    console.error('KV read error:', err.message);
+  }
+
+  if (!flow) {
+    if (storeId === 'test') flow = FALLBACK_MAP;
+    else {
+      await sendMessage(chatId, 'المتجر غير جاهز بعد.');
+      return res.status(200).end();
+    }
+  }
+
+  const { nodes, connections } = flow;
+
+  if (!sessions.has(chatId)) sessions.set(chatId, { currentNodeId: nodes[0].id, variables: {} });
+  const session = sessions.get(chatId);
+  const currentNode = getNodeById(session.currentNodeId, nodes);
+  if (!currentNode) {
+    await sendMessage(chatId, 'عذراً، فقدت مكانك في المحادثة. اكتب /start للبدء من جديد.');
+    return res.status(200).end();
+  }
+
+  try {
+    switch (currentNode.type) {
+      case 'message':
+        await sendMessage(chatId, replaceVariables(currentNode.title, session.variables));
+        const nextMsg = getConnectionTarget(currentNode.id, connections, nodes);
+        if (nextMsg) {
+          session.currentNodeId = nextMsg.id;
+          if (nextMsg.prompt) await sendMessage(chatId, replaceVariables(nextMsg.prompt, session.variables));
+        }
+        break;
+      case 'input':
+        if (currentNode.variableName) session.variables[currentNode.variableName] = userText;
+        const nextInp = getConnectionTarget(currentNode.id, connections, nodes);
+        if (nextInp) {
+          session.currentNodeId = nextInp.id;
+          if (nextInp.type === 'message') await sendMessage(chatId, replaceVariables(nextInp.title, session.variables));
+          else if (nextInp.prompt) await sendMessage(chatId, replaceVariables(nextInp.prompt, session.variables));
+        }
+        break;
+      case 'intent': {
+        const options = connections.filter(c => c.from === currentNode.id && c.condition && c.condition !== 'fallback').map(c => c.condition);
+        const fallbackConn = connections.find(c => c.from === currentNode.id && c.condition === 'fallback');
+        let intent = quickKeywordMatch(userText);
+        if (!intent) {
+          const geminiResult = await classifyIntent(userText, options, chatId);
+          if (geminiResult && geminiResult.intent !== 'none' && geminiResult.confidence >= 0.6 && options.includes(geminiResult.intent))
+            intent = geminiResult.intent;
+          else intent = null;
+        }
+        if (intent && options.includes(intent)) {
+          const matched = connections.find(c => c.from === currentNode.id && c.condition === intent);
+          if (matched) {
+            const nextNode = getNodeById(matched.to, nodes);
+            if (nextNode) {
+              session.currentNodeId = nextNode.id;
+              await sendMessage(chatId, replaceVariables(nextNode.title, session.variables));
+            }
+          }
+        } else {
+          if (fallbackConn) {
+            const fallbackNode = getNodeById(fallbackConn.to, nodes);
+            if (fallbackNode) {
+              session.currentNodeId = fallbackNode.id;
+              await sendMessage(chatId, replaceVariables(fallbackNode.title, session.variables));
+            }
+          } else await sendMessage(chatId, 'لم أفهم قصدك، حاول مجدداً.');
+        }
+        break;
+      }
+      default: await sendMessage(chatId, 'نوع عقدة غير معروف.');
+    }
+  } catch (err) {
+    console.error('Error:', err.message);
+    await sendMessage(chatId, 'حدث خطأ غير متوقع.');
+  }
+  res.status(200).end();
 };
