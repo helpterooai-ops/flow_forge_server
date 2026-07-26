@@ -66,7 +66,7 @@ function getConnectionTarget(nodeId, connections, nodes) {
 
 module.exports = async (req, res) => {
 
-  // ========== نقطة نشر بوت بايثون (عبر Vercel) ==========
+  // ========== نقطة نشر بوت بايثون ==========
   if (req.method === 'POST' && req.url === '/api/v1/deploy') {
     const { projectName, botToken, pythonCode } = req.body;
     if (!projectName || !botToken || !pythonCode) {
@@ -78,16 +78,14 @@ module.exports = async (req, res) => {
 
     try {
       const safeName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, '').replace(/---/g, '-').slice(0, 80) + '-' + Date.now();
-      const safeCode = pythonCode; // بدون أي تعديل
+      const safeCode = pythonCode; // ✅ لا يوجد أي تعديل على الكود
 
-      // 1. إنشاء مشروع Vercel
       const newProject = await axios.post('https://api.vercel.com/v10/projects',
         { name: safeName },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
       const projectId = newProject.data.id;
 
-      // 2. حقن التوكن كمتغير بيئة
       await axios.post(`https://api.vercel.com/v10/projects/${projectId}/env`,
         { key: 'BOT_TOKEN', value: botToken, type: 'encrypted', target: ['production', 'preview', 'development'] },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
@@ -100,14 +98,10 @@ module.exports = async (req, res) => {
 
       const files = [
         { file: 'bot.py', data: safeCode },
-        { file: 'requirements.txt', data: 'python-telegram-bot==20.8
-flask
-pyTelegramBotAPI
-nest-asyncio==1.6.0' },
+        { file: 'requirements.txt', data: 'python-telegram-bot==20.8\nflask\npyTelegramBotAPI\nnest-asyncio==1.6.0' },
         { file: 'vercel.json', data: JSON.stringify(vercelJsonConfig) }
       ];
 
-      // 3. نشر الملفات
       await axios.post('https://api.vercel.com/v13/deployments',
         {
           name: safeName,
@@ -120,7 +114,6 @@ nest-asyncio==1.6.0' },
         { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
       );
 
-      // 4. انتظار النشر وجلب الرابط
       let domain = null;
       for (let i = 0; i < 6; i++) {
         await new Promise(resolve => setTimeout(resolve, 5000));
